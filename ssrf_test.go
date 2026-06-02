@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,99 +23,99 @@ func TestValidateURL(t *testing.T) {
 		wantErr bool
 	}{
 		// Valid URLs.
-		{"valid https", "https://example.com/file.srt", false},
-		{"valid https with path", "https://dl.opensubtitles.org/en/download/sub/123", false},
-		{"public IP allowed", "https://1.2.3.4/file.srt", false},
-		{"public IPv6 allowed", "https://[2606:4700::1]/file.srt", false},
+		{"valid https", "https://example.com/file.txt", false},
+		{"valid https with path", "https://cdn.example.com/resource/123", false},
+		{"public IP allowed", "https://1.2.3.4/file.txt", false},
+		{"public IPv6 allowed", "https://[2606:4700::1]/file.txt", false},
 
 		// Scheme rejection.
-		{"http rejected", "http://example.com/file.srt", true},
-		{"ftp rejected", "ftp://example.com/file.srt", true},
-		{"empty scheme rejected", "://example.com/file.srt", true},
-		{"no scheme rejected", "example.com/file.srt", true},
+		{"http rejected", "http://example.com/file.txt", true},
+		{"ftp rejected", "ftp://example.com/file.txt", true},
+		{"empty scheme rejected", "://example.com/file.txt", true},
+		{"no scheme rejected", "example.com/file.txt", true},
 
 		// Host rejection.
 		{"empty string", "", true},
 		{"empty host", "https://", true},
-		{"localhost rejected", "https://localhost/file.srt", true},
-		{"localhost uppercase rejected", "https://LOCALHOST/file.srt", true},
-		{"localhost trailing dot rejected", "https://localhost./file.srt", true},
-		{"localhost double trailing dot rejected", "https://localhost../file.srt", true},
-		{"localhost uppercase trailing dot rejected", "https://LOCALHOST./file.srt", true},
-		{"only dots rejected", "https://../file.srt", true},
-		{"bare hostname rejected", "https://internal/file.srt", true},
+		{"localhost rejected", "https://localhost/file.txt", true},
+		{"localhost uppercase rejected", "https://LOCALHOST/file.txt", true},
+		{"localhost trailing dot rejected", "https://localhost./file.txt", true},
+		{"localhost double trailing dot rejected", "https://localhost../file.txt", true},
+		{"localhost uppercase trailing dot rejected", "https://LOCALHOST./file.txt", true},
+		{"only dots rejected", "https://../file.txt", true},
+		{"bare hostname rejected", "https://internal/file.txt", true},
 
 		// IPv4 private/reserved.
-		{"loopback IP rejected", "https://127.0.0.1/file.srt", true},
-		{"private 192.168 rejected", "https://192.168.1.77/file.srt", true},
-		{"private 10.x rejected", "https://10.0.0.1/file.srt", true},
-		{"private 172.16 rejected", "https://172.16.0.1/file.srt", true},
-		{"link-local rejected", "https://169.254.1.1/file.srt", true},
-		{"unspecified rejected", "https://0.0.0.0/file.srt", true},
+		{"loopback IP rejected", "https://127.0.0.1/file.txt", true},
+		{"private 192.168 rejected", "https://192.168.1.77/file.txt", true},
+		{"private 10.x rejected", "https://10.0.0.1/file.txt", true},
+		{"private 172.16 rejected", "https://172.16.0.1/file.txt", true},
+		{"link-local rejected", "https://169.254.1.1/file.txt", true},
+		{"unspecified rejected", "https://0.0.0.0/file.txt", true},
 
 		// RFC 6890 "this host on this network" 0.0.0.0/8 (beyond IsUnspecified).
-		{"this-host 0.1.2.3 rejected", "https://0.1.2.3/file.srt", true},
-		{"this-host 0.127.0.0.1 rejected", "https://0.127.0.1/file.srt", true},
-		{"this-host 0.255.255.255 rejected", "https://0.255.255.255/file.srt", true},
-		{"just above this-host 1.0.0.0 allowed", "https://1.0.0.0/file.srt", false},
+		{"this-host 0.1.2.3 rejected", "https://0.1.2.3/file.txt", true},
+		{"this-host 0.127.0.0.1 rejected", "https://0.127.0.1/file.txt", true},
+		{"this-host 0.255.255.255 rejected", "https://0.255.255.255/file.txt", true},
+		{"just above this-host 1.0.0.0 allowed", "https://1.0.0.0/file.txt", false},
 
 		// RFC 1112 §4 reserved 240.0.0.0/4 (former Class E).
-		{"reserved 240.0.0.1 rejected", "https://240.0.0.1/file.srt", true},
-		{"reserved 250.1.2.3 rejected", "https://250.1.2.3/file.srt", true},
-		{"broadcast 255.255.255.255 rejected", "https://255.255.255.255/file.srt", true},
-		{"just below reserved 239.255.255.255 rejected (multicast)", "https://239.255.255.255/file.srt", true},
+		{"reserved 240.0.0.1 rejected", "https://240.0.0.1/file.txt", true},
+		{"reserved 250.1.2.3 rejected", "https://250.1.2.3/file.txt", true},
+		{"broadcast 255.255.255.255 rejected", "https://255.255.255.255/file.txt", true},
+		{"just below reserved 239.255.255.255 rejected (multicast)", "https://239.255.255.255/file.txt", true},
 
 		// IPv6 private/reserved.
-		{"IPv6 loopback rejected", "https://[::1]/file.srt", true},
-		{"IPv6 ULA rejected", "https://[fc00::1]/file.srt", true},
-		{"IPv6 link-local rejected", "https://[fe80::1]/file.srt", true},
-		{"IPv6 multicast rejected", "https://[ff02::1]/file.srt", true},
-		{"IPv6 unspecified rejected", "https://[::]/file.srt", true},
+		{"IPv6 loopback rejected", "https://[::1]/file.txt", true},
+		{"IPv6 ULA rejected", "https://[fc00::1]/file.txt", true},
+		{"IPv6 link-local rejected", "https://[fe80::1]/file.txt", true},
+		{"IPv6 multicast rejected", "https://[ff02::1]/file.txt", true},
+		{"IPv6 unspecified rejected", "https://[::]/file.txt", true},
 
 		// IPv4-mapped IPv6 bypass attempts.
-		{"IPv4-mapped loopback rejected", "https://[::ffff:127.0.0.1]/file.srt", true},
-		{"IPv4-mapped private rejected", "https://[::ffff:192.168.1.1]/file.srt", true},
+		{"IPv4-mapped loopback rejected", "https://[::ffff:127.0.0.1]/file.txt", true},
+		{"IPv4-mapped private rejected", "https://[::ffff:192.168.1.1]/file.txt", true},
 
 		// RFC 3056 6to4 wrapper (2002::/16) with embedded IPv4.
-		{"6to4 embedded loopback rejected", "https://[2002:7f00:0001::]/file.srt", true},
-		{"6to4 embedded private 192.168 rejected", "https://[2002:c0a8:0101::]/file.srt", true},
-		{"6to4 embedded private 10.0 rejected", "https://[2002:0a00:0001::]/file.srt", true},
-		{"6to4 embedded CGNAT rejected", "https://[2002:6440:0001::]/file.srt", true},
-		{"6to4 embedded public 8.8.8.8 allowed", "https://[2002:0808:0808::]/file.srt", false},
+		{"6to4 embedded loopback rejected", "https://[2002:7f00:0001::]/file.txt", true},
+		{"6to4 embedded private 192.168 rejected", "https://[2002:c0a8:0101::]/file.txt", true},
+		{"6to4 embedded private 10.0 rejected", "https://[2002:0a00:0001::]/file.txt", true},
+		{"6to4 embedded CGNAT rejected", "https://[2002:6440:0001::]/file.txt", true},
+		{"6to4 embedded public 8.8.8.8 allowed", "https://[2002:0808:0808::]/file.txt", false},
 
 		// RFC 6052 NAT64 well-known prefix (64:ff9b::/96).
-		{"NAT64 embedded loopback rejected", "https://[64:ff9b::7f00:1]/file.srt", true},
-		{"NAT64 embedded private rejected", "https://[64:ff9b::c0a8:101]/file.srt", true},
-		{"NAT64 embedded 10.0 rejected", "https://[64:ff9b::a00:1]/file.srt", true},
-		{"NAT64 embedded public allowed", "https://[64:ff9b::808:808]/file.srt", false},
+		{"NAT64 embedded loopback rejected", "https://[64:ff9b::7f00:1]/file.txt", true},
+		{"NAT64 embedded private rejected", "https://[64:ff9b::c0a8:101]/file.txt", true},
+		{"NAT64 embedded 10.0 rejected", "https://[64:ff9b::a00:1]/file.txt", true},
+		{"NAT64 embedded public allowed", "https://[64:ff9b::808:808]/file.txt", false},
 
 		// RFC 4291 §2.5.5.1 deprecated IPv4-compatible IPv6 (::/96).
-		{"IPv4-compat loopback rejected", "https://[::127.0.0.1]/file.srt", true},
-		{"IPv4-compat private 192.168 rejected", "https://[::192.168.1.1]/file.srt", true},
-		{"IPv4-compat private 10 rejected", "https://[::10.0.0.1]/file.srt", true},
+		{"IPv4-compat loopback rejected", "https://[::127.0.0.1]/file.txt", true},
+		{"IPv4-compat private 192.168 rejected", "https://[::192.168.1.1]/file.txt", true},
+		{"IPv4-compat private 10 rejected", "https://[::10.0.0.1]/file.txt", true},
 
 		// RFC 6598 shared address space (CGNAT).
-		{"CGNAT 100.64 rejected", "https://100.64.0.1/file.srt", true},
-		{"CGNAT 100.127 rejected", "https://100.127.255.254/file.srt", true},
-		{"non-CGNAT 100.128 allowed", "https://100.128.0.1/file.srt", false},
+		{"CGNAT 100.64 rejected", "https://100.64.0.1/file.txt", true},
+		{"CGNAT 100.127 rejected", "https://100.127.255.254/file.txt", true},
+		{"non-CGNAT 100.128 allowed", "https://100.128.0.1/file.txt", false},
 
 		// SSRF bypass vectors (documentation-as-tests: Go's url.Parse handles
 		// these correctly, but tests prove the SSRF layer doesn't regress).
-		{"userinfo bypass rejected", "https://evil@127.0.0.1/file.srt", true},
-		{"loopback with port rejected", "https://127.0.0.1:8080/file.srt", true},
-		{"private with port rejected", "https://192.168.1.1:443/file.srt", true},
-		{"public with port allowed", "https://example.com:443/file.srt", false},
-		{"URL with fragment allowed", "https://example.com/file.srt#frag", false},
+		{"userinfo bypass rejected", "https://evil@127.0.0.1/file.txt", true},
+		{"loopback with port rejected", "https://127.0.0.1:8080/file.txt", true},
+		{"private with port rejected", "https://192.168.1.1:443/file.txt", true},
+		{"public with port allowed", "https://example.com:443/file.txt", false},
+		{"URL with fragment allowed", "https://example.com/file.txt#frag", false},
 
 		// DNS rebinding: ValidateURL accepts public hostnames even if they
 		// could resolve to private IPs. SafeTransport's DialContext catches
 		// private addresses after DNS resolution; SafeRedirectPolicy catches
 		// redirects to literal private IPs or bare names.
-		{"DNS rebinding hostname accepted (caught by dial context)", "https://evil.attacker.com/file.srt", false},
+		{"DNS rebinding hostname accepted (caught by dial context)", "https://evil.attacker.com/file.txt", false},
 
 		// CGNAT boundary values.
-		{"CGNAT first address rejected", "https://100.64.0.0/file.srt", true},
-		{"just below CGNAT allowed", "https://100.63.255.255/file.srt", false},
+		{"CGNAT first address rejected", "https://100.64.0.0/file.txt", true},
+		{"just below CGNAT allowed", "https://100.63.255.255/file.txt", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,7 +201,7 @@ func TestSafeRedirectPolicy_blocks_private_redirect(t *testing.T) {
 func TestSafeRedirectPolicy_blocks_http_downgrade(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/file.srt", http.NoBody)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/file.txt", http.NoBody)
 	err := policy(req, nil)
 	if err == nil {
 		t.Error("SafeRedirectPolicy() = nil, want error for http scheme downgrade")
@@ -210,7 +211,7 @@ func TestSafeRedirectPolicy_blocks_http_downgrade(t *testing.T) {
 func TestSafeRedirectPolicy_allows_public_redirect(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://cdn.example.com/file.srt", http.NoBody)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://cdn.example.com/file.txt", http.NoBody)
 	err := policy(req, nil)
 	if err != nil {
 		t.Errorf("SafeRedirectPolicy() = %v, want nil for public redirect", err)
@@ -386,7 +387,7 @@ func TestValidateURL_ipv4_mapped_ipv6_consistency(t *testing.T) {
 		if !isPublicAddr(addr) {
 			mapped := netip.AddrFrom16(addr.As16())
 			host := mapped.String()
-			url := fmt.Sprintf("https://[%s]/file.srt", host)
+			url := fmt.Sprintf("https://[%s]/file.txt", host)
 			err := ValidateURL(url)
 			if err == nil {
 				t.Errorf("ValidateURL(%q) = nil, want error for IPv4-mapped IPv6 of non-public %v", url, addr)
@@ -399,7 +400,7 @@ func TestValidateURL_ipv4_mapped_ipv6_consistency(t *testing.T) {
 
 func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
 	// 127.0.0.1 is a literal IP that resolves to itself (loopback).
 	_, err := dial(context.Background(), "tcp", "127.0.0.1:443")
 	if err == nil {
@@ -409,7 +410,7 @@ func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 
 func TestSafeDialContext_blocks_private_range(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
 	_, err := dial(context.Background(), "tcp", "192.168.1.1:443")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for private IP")
@@ -418,7 +419,7 @@ func TestSafeDialContext_blocks_private_range(t *testing.T) {
 
 func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
 	_, err := dial(context.Background(), "tcp", "no-port")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for invalid address")
@@ -431,7 +432,7 @@ func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 // with a nil error (which callers would treat as a successful connection).
 func TestSafeDialContext_dns_lookup_error_is_wrapped(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -491,4 +492,520 @@ func TestValidateURL_Property_HTTPSRequired(t *testing.T) {
 		// (may still fail on DNS resolution, which is fine)
 		_ = ValidateURL(httpsURL)
 	})
+}
+
+// --- Security: Teredo (RFC 4380) embedded IPv4 extraction ---
+
+func TestIsPublicAddr_Teredo_embedded_loopback(t *testing.T) {
+	t.Parallel()
+	// 2001:0000:xxxx:xxxx:xxxx:xxxx:YYYY:ZZZZ
+	// Client IPv4 = XOR(bytes 12-15, 0xFF). 127.0.0.1 = 7f000001
+	// XOR'd = 80ffff fe → bytes 12-15 = 0x80, 0xFF, 0xFF, 0xFE
+	// Full: 2001:0000:4136:e378:8000:63bf:80ff:fffe
+	addr := netip.MustParseAddr("2001:0000:4136:e378:8000:63bf:80ff:fffe")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (Teredo embedding 127.0.0.1)", addr)
+	}
+}
+
+func TestIsPublicAddr_Teredo_embedded_private_10(t *testing.T) {
+	t.Parallel()
+	// 10.0.0.1 = 0a000001, XOR'd = f5fffffe
+	addr := netip.MustParseAddr("2001:0000:4136:e378:8000:63bf:f5ff:fffe")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (Teredo embedding 10.0.0.1)", addr)
+	}
+}
+
+func TestIsPublicAddr_Teredo_embedded_link_local(t *testing.T) {
+	t.Parallel()
+	// 169.254.169.254 = a9fea9fe, XOR'd = 56015601
+	addr := netip.MustParseAddr("2001:0000:4136:e378:8000:63bf:5601:5601")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (Teredo embedding 169.254.169.254)", addr)
+	}
+}
+
+func TestIsPublicAddr_Teredo_embedded_public_allowed(t *testing.T) {
+	t.Parallel()
+	// 8.8.8.8 = 08080808, XOR'd = f7f7f7f7
+	// Server = 8.8.4.4 (public)
+	addr := netip.MustParseAddr("2001:0000:0808:0404:8000:63bf:f7f7:f7f7")
+	if !isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = false, want true (Teredo embedding 8.8.8.8 with server 8.8.4.4)", addr)
+	}
+}
+
+func TestIsPublicAddr_Teredo_private_server(t *testing.T) {
+	t.Parallel()
+	// Server IP = 10.0.0.1 (bytes 4-7), client = 8.8.8.8 XOR'd
+	addr := netip.MustParseAddr("2001:0000:0a00:0001:8000:63bf:f7f7:f7f7")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (Teredo with private server 10.0.0.1)", addr)
+	}
+}
+
+func TestValidateURL_Teredo_embedded_loopback(t *testing.T) {
+	t.Parallel()
+	err := ValidateURL("https://[2001:0000:4136:e378:8000:63bf:80ff:fffe]/file")
+	if err == nil {
+		t.Error("ValidateURL() = nil, want error for Teredo embedding 127.0.0.1")
+	}
+}
+
+// --- Security: RFC 8215 local NAT64 (64:ff9b:1::/48) ---
+
+func TestIsPublicAddr_NAT64Local_embedded_loopback(t *testing.T) {
+	t.Parallel()
+	// 64:ff9b:1::7f00:1 embeds 127.0.0.1
+	addr := netip.MustParseAddr("64:ff9b:1::7f00:1")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (NAT64 local embedding 127.0.0.1)", addr)
+	}
+}
+
+func TestIsPublicAddr_NAT64Local_embedded_private(t *testing.T) {
+	t.Parallel()
+	addr := netip.MustParseAddr("64:ff9b:1::c0a8:101")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (NAT64 local embedding 192.168.1.1)", addr)
+	}
+}
+
+func TestIsPublicAddr_NAT64Local_blocked_outright(t *testing.T) {
+	t.Parallel()
+	// RFC 8215 local-use NAT64 (64:ff9b:1::/48) is blocked outright rather
+	// than IPv4-extracted: the /48 RFC 6052 embedding offset differs from the
+	// well-known /96, so extracting bytes 12-15 would be a potential SSRF bypass.
+	addr := netip.MustParseAddr("64:ff9b:1::808:808")
+	if isPublicAddr(addr) {
+		t.Errorf("isPublicAddr(%v) = true, want false (local NAT64 blocked outright)", addr)
+	}
+}
+
+func TestValidateURL_NAT64Local_embedded_loopback(t *testing.T) {
+	t.Parallel()
+	err := ValidateURL("https://[64:ff9b:1::7f00:1]/file")
+	if err == nil {
+		t.Error("ValidateURL() = nil, want error for NAT64 local embedding 127.0.0.1")
+	}
+}
+
+// --- Security: IPv4 non-routable ranges (RFC 5737, RFC 2544, RFC 5736) ---
+
+func TestIsPublicAddr_IPv4_NonRoutable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		ip   string
+	}{
+		{"IETF Protocol Assignments 192.0.0.1", "192.0.0.1"},
+		{"IETF Protocol Assignments 192.0.0.254", "192.0.0.254"},
+		{"TEST-NET-1 192.0.2.1", "192.0.2.1"},
+		{"TEST-NET-1 192.0.2.255", "192.0.2.255"},
+		{"TEST-NET-2 198.51.100.1", "198.51.100.1"},
+		{"TEST-NET-2 198.51.100.255", "198.51.100.255"},
+		{"TEST-NET-3 203.0.113.1", "203.0.113.1"},
+		{"TEST-NET-3 203.0.113.255", "203.0.113.255"},
+		{"Benchmarking 198.18.0.1", "198.18.0.1"},
+		{"Benchmarking 198.19.255.255", "198.19.255.255"},
+		{"6to4 relay 192.88.99.1", "192.88.99.1"},
+		{"6to4 relay 192.88.99.255", "192.88.99.255"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			addr := netip.MustParseAddr(tc.ip)
+			if isPublicAddr(addr) {
+				t.Errorf("isPublicAddr(%v) = true, want false", addr)
+			}
+		})
+	}
+}
+
+func TestValidateURL_IPv4_NonRoutable(t *testing.T) {
+	t.Parallel()
+	urls := []string{
+		"https://192.0.2.1/file",
+		"https://198.51.100.1/file",
+		"https://203.0.113.1/file",
+		"https://198.18.0.1/file",
+		"https://192.88.99.1/file",
+		"https://192.0.0.1/file",
+	}
+	for _, u := range urls {
+		t.Run(u, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateURL(u); err == nil {
+				t.Errorf("ValidateURL(%q) = nil, want error", u)
+			}
+		})
+	}
+}
+
+// --- Security: IPv6 non-routable ranges ---
+
+func TestIsPublicAddr_IPv6_NonRoutable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		ip   string
+	}{
+		{"Discard 100::1", "100::1"},
+		{"Discard 100::ffff:ffff:ffff:ffff", "100::ffff:ffff:ffff:ffff"},
+		{"Benchmarking 2001:2::1", "2001:2::1"},
+		{"Benchmarking 2001:2:0:ffff::", "2001:2:0:ffff::"},
+		{"Documentation 2001:db8::1", "2001:db8::1"},
+		{"Documentation 2001:db8:ffff:ffff::", "2001:db8:ffff:ffff::"},
+		{"Documentation new 3fff::1", "3fff::1"},
+		{"Documentation new 3fff:f:ffff::", "3fff:f:ffff::"},
+		{"SRv6 SIDs 5f00::1", "5f00::1"},
+		{"SRv6 SIDs 5f00:ffff::", "5f00:ffff::"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			addr := netip.MustParseAddr(tc.ip)
+			if isPublicAddr(addr) {
+				t.Errorf("isPublicAddr(%v) = true, want false", addr)
+			}
+		})
+	}
+}
+
+func TestValidateURL_IPv6_NonRoutable(t *testing.T) {
+	t.Parallel()
+	urls := []string{
+		"https://[100::1]/file",
+		"https://[2001:2::1]/file",
+		"https://[2001:db8::1]/file",
+		"https://[3fff::1]/file",
+		"https://[5f00::1]/file",
+	}
+	for _, u := range urls {
+		t.Run(u, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateURL(u); err == nil {
+				t.Errorf("ValidateURL(%q) = nil, want error", u)
+			}
+		})
+	}
+}
+
+// --- Structured error types ---
+
+func TestError_Kind(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		url  string
+		kind ErrorKind
+	}{
+		{"bad scheme", "http://example.com/f", KindBadScheme},
+		{"empty host", "https:///f", KindEmptyHost},
+		{"localhost", "https://localhost/f", KindLocalhost},
+		{"bare hostname", "https://internal/f", KindBareHostname},
+		{"non-public IP", "https://127.0.0.1/f", KindNonPublicIP},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateURL(tc.url)
+			if err == nil {
+				t.Fatalf("ValidateURL(%q) = nil, want error", tc.url)
+			}
+			var ssrfError *Error
+			if !errors.As(err, &ssrfError) {
+				t.Fatalf("ValidateURL(%q) error is not *Error: %T", tc.url, err)
+			}
+			if ssrfError.Kind != tc.kind {
+				t.Errorf("ValidateURL(%q) error Kind = %d, want %d", tc.url, ssrfError.Kind, tc.kind)
+			}
+		})
+	}
+}
+
+func TestError_Unwrap(t *testing.T) {
+	t.Parallel()
+	err := ValidateURL("not a url at all ://")
+	if err == nil {
+		t.Skip("URL parsed without error")
+	}
+	var ssrfError *Error
+	if errors.As(err, &ssrfError) {
+		// KindInvalidURL should wrap the url.Parse error
+		if ssrfError.Kind == KindInvalidURL && ssrfError.Err == nil {
+			t.Error("KindInvalidURL should wrap underlying parse error")
+		}
+	}
+}
+
+// --- Exported IsPublicAddr ---
+
+func TestIsPublicAddr_exported(t *testing.T) {
+	t.Parallel()
+	if !IsPublicAddr(netip.MustParseAddr("8.8.8.8")) {
+		t.Error("IsPublicAddr(8.8.8.8) = false, want true")
+	}
+	if IsPublicAddr(netip.MustParseAddr("127.0.0.1")) {
+		t.Error("IsPublicAddr(127.0.0.1) = true, want false")
+	}
+	if IsPublicAddr(netip.MustParseAddr("192.0.2.1")) {
+		t.Error("IsPublicAddr(192.0.2.1) = true, want false (TEST-NET-1)")
+	}
+	if IsPublicAddr(netip.MustParseAddr("2001:db8::1")) {
+		t.Error("IsPublicAddr(2001:db8::1) = true, want false (documentation)")
+	}
+}
+
+// Regression: IsPublicAddr must reject IPv4-mapped IPv6 forms of non-public
+// addresses even when called directly (without prior Unmap by the caller).
+// Previously sharedAddrSpace.Contains missed ::ffff:100.64.0.1 because the
+// prefix is IPv4 and the address was IPv6.
+func TestIsPublicAddr_mapped_CGNAT_regression(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		ip   string
+	}{
+		{"mapped CGNAT", "::ffff:100.64.0.1"},
+		{"mapped CGNAT boundary", "::ffff:100.127.255.255"},
+		{"mapped loopback", "::ffff:127.0.0.1"},
+		{"mapped private 10", "::ffff:10.0.0.1"},
+		{"mapped private 192.168", "::ffff:192.168.1.1"},
+		{"mapped link-local", "::ffff:169.254.1.1"},
+		{"mapped this-host", "::ffff:0.1.2.3"},
+		{"mapped reserved 240", "::ffff:240.0.0.1"},
+		{"mapped TEST-NET-1", "::ffff:192.0.2.1"},
+		{"mapped benchmarking", "::ffff:198.18.0.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			addr := netip.MustParseAddr(tc.ip)
+			if IsPublicAddr(addr) {
+				t.Errorf("IsPublicAddr(%v) = true, want false", addr)
+			}
+		})
+	}
+}
+
+// Positive case: mapped public IPs must still be allowed.
+func TestIsPublicAddr_mapped_public_allowed(t *testing.T) {
+	t.Parallel()
+	addr := netip.MustParseAddr("::ffff:8.8.8.8")
+	if !IsPublicAddr(addr) {
+		t.Errorf("IsPublicAddr(%v) = false, want true", addr)
+	}
+}
+
+// --- net.Dialer.Control hook (defense-in-depth) ---
+
+func TestSafeControl_blocks_non_tcp(t *testing.T) {
+	t.Parallel()
+	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	err := ctrl("udp4", "8.8.8.8:443", nil)
+	if err == nil {
+		t.Error("safeControl() = nil, want error for non-TCP network")
+	}
+}
+
+func TestSafeControl_blocks_private_ip(t *testing.T) {
+	t.Parallel()
+	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	err := ctrl("tcp4", "127.0.0.1:443", nil)
+	if err == nil {
+		t.Error("safeControl() = nil, want error for loopback IP")
+	}
+	err = ctrl("tcp4", "10.0.0.1:443", nil)
+	if err == nil {
+		t.Error("safeControl() = nil, want error for private IP")
+	}
+}
+
+func TestSafeControl_allows_public_ip(t *testing.T) {
+	t.Parallel()
+	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	err := ctrl("tcp4", "8.8.8.8:443", nil)
+	if err != nil {
+		t.Errorf("safeControl() = %v, want nil for public IP", err)
+	}
+	err = ctrl("tcp6", "[2606:4700::1]:443", nil)
+	if err != nil {
+		t.Errorf("safeControl() = %v, want nil for public IPv6", err)
+	}
+}
+
+func TestSafeControl_blocks_disallowed_port(t *testing.T) {
+	t.Parallel()
+	ports := map[uint16]struct{}{443: {}}
+	ctrl := safeControl(isPublicAddr, ports, slog.Default())
+	err := ctrl("tcp4", "8.8.8.8:80", nil)
+	if err == nil {
+		t.Error("safeControl() = nil, want error for port 80 when only 443 allowed")
+	}
+	var ssrfError *Error
+	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindBadPort {
+		t.Errorf("expected KindBadPort, got %v", err)
+	}
+}
+
+func TestSafeControl_allows_permitted_port(t *testing.T) {
+	t.Parallel()
+	ports := map[uint16]struct{}{443: {}, 8443: {}}
+	ctrl := safeControl(isPublicAddr, ports, slog.Default())
+	err := ctrl("tcp4", "8.8.8.8:443", nil)
+	if err != nil {
+		t.Errorf("safeControl() = %v, want nil for allowed port 443", err)
+	}
+	err = ctrl("tcp4", "8.8.8.8:8443", nil)
+	if err != nil {
+		t.Errorf("safeControl() = %v, want nil for allowed port 8443", err)
+	}
+}
+
+func TestSafeControl_nil_ports_allows_all(t *testing.T) {
+	t.Parallel()
+	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	err := ctrl("tcp4", "8.8.8.8:12345", nil)
+	if err != nil {
+		t.Errorf("safeControl() = %v, want nil when no port restrictions", err)
+	}
+}
+
+// --- Port restrictions (WithAllowedPorts) ---
+
+func TestWithAllowedPorts_blocks_disallowed(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport(WithAllowedPorts(443))
+	dial := tr.DialContext
+	_, err := dial(context.Background(), "tcp", "8.8.8.8:80")
+	if err == nil {
+		t.Error("expected error for port 80 when only 443 allowed")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Errorf("expected port-not-allowed error, got: %v", err)
+	}
+}
+
+func TestWithAllowedPorts_allows_permitted(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport(WithAllowedPorts(443, 80))
+	dial := tr.DialContext
+	// Port 80 is allowed but connection may fail (timeout) — no SSRF error.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := dial(ctx, "tcp", "8.8.8.8:80")
+	if err != nil && strings.Contains(err.Error(), "not allowed") {
+		t.Errorf("port 80 should be allowed, got: %v", err)
+	}
+}
+
+func TestWithAllowedPorts_empty_allows_all(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport(WithAllowedPorts())
+	dial := tr.DialContext
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := dial(ctx, "tcp", "8.8.8.8:12345")
+	if err != nil && strings.Contains(err.Error(), "not allowed") {
+		t.Errorf("all ports should be allowed, got: %v", err)
+	}
+}
+
+func TestWithAllowedPorts_default_only_443(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport() // default
+	dial := tr.DialContext
+	_, err := dial(context.Background(), "tcp", "8.8.8.8:80")
+	if err == nil {
+		t.Error("default should only allow port 443")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Errorf("expected port error, got: %v", err)
+	}
+}
+
+// --- Scheme allowlist (WithAllowedSchemes) ---
+
+func TestWithAllowedSchemes_rejects_disallowed(t *testing.T) {
+	t.Parallel()
+	schemes := map[string]struct{}{"https": {}}
+	err := validateURLWithSchemes("http://example.com/f", schemes, slog.Default())
+	if err == nil {
+		t.Error("expected error for http when only https allowed")
+	}
+	var ssrfError *Error
+	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindBadScheme {
+		t.Errorf("expected KindBadScheme, got %v", err)
+	}
+}
+
+func TestWithAllowedSchemes_allows_http_when_configured(t *testing.T) {
+	t.Parallel()
+	schemes := map[string]struct{}{"https": {}, "http": {}}
+	err := validateURLWithSchemes("http://example.com/f", schemes, slog.Default())
+	if err != nil {
+		t.Errorf("http should be allowed, got: %v", err)
+	}
+}
+
+func TestWithAllowedSchemes_case_insensitive(t *testing.T) {
+	t.Parallel()
+	schemes := map[string]struct{}{"https": {}}
+	err := validateURLWithSchemes("HTTPS://example.com/f", schemes, slog.Default())
+	if err != nil {
+		t.Errorf("HTTPS (uppercase) should match, got: %v", err)
+	}
+}
+
+func TestAllowedSchemes_helper(t *testing.T) {
+	t.Parallel()
+	s := AllowedSchemes(WithAllowedSchemes("http", "https"))
+	if _, ok := s["http"]; !ok {
+		t.Error("AllowedSchemes should include http")
+	}
+	if _, ok := s["https"]; !ok {
+		t.Error("AllowedSchemes should include https")
+	}
+}
+
+func TestSafeRedirectPolicyWithSchemes_blocks_disallowed(t *testing.T) {
+	t.Parallel()
+	schemes := map[string]struct{}{"https": {}}
+	policy := SafeRedirectPolicyWithSchemes(schemes, nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/f", http.NoBody)
+	err := policy(req, nil)
+	if err == nil {
+		t.Error("redirect to http should be blocked")
+	}
+}
+
+func TestSafeRedirectPolicyWithSchemes_allows_configured(t *testing.T) {
+	t.Parallel()
+	schemes := map[string]struct{}{"https": {}, "http": {}}
+	policy := SafeRedirectPolicyWithSchemes(schemes, nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.com/f", http.NoBody)
+	err := policy(req, nil)
+	if err != nil {
+		t.Errorf("redirect to http should be allowed, got: %v", err)
+	}
+}
+
+// --- Integration: Control hook fires on actual dial ---
+
+func TestSafeTransport_control_hook_fires(t *testing.T) {
+	t.Parallel()
+	// With a custom policy that allows everything + custom resolver
+	// returning a private IP, the resolve-once layer passes (allow-all policy)
+	// but the Control hook should also pass (same policy).
+	allowAll := func(_ netip.Addr) bool { return true }
+	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
+	tr := SafeTransport(WithPolicy(allowAll), WithResolver(r), WithAllowedPorts())
+	dial := tr.DialContext
+	// Should attempt dial to 127.0.0.1:1 (will fail to connect, not SSRF error).
+	_, err := dial(context.Background(), "tcp", "evil.com:1")
+	if err != nil && strings.Contains(err.Error(), "not public") {
+		t.Errorf("allow-all policy should pass Control hook, got: %v", err)
+	}
 }
