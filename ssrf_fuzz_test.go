@@ -96,6 +96,10 @@ var independentBlockedRanges = []blockedRange{
 	{netip.MustParsePrefix("2001:db8::/32"), "Documentation6"},
 	{netip.MustParsePrefix("3fff::/20"), "Documentation6New"},
 	{netip.MustParsePrefix("5f00::/16"), "SRv6SIDs"},
+	// NAT64 local (RFC 8215)
+	{netip.MustParsePrefix("64:ff9b:1::/48"), "NAT64Local"},
+	// 6to4 relay anycast (RFC 7526)
+	{netip.MustParsePrefix("192.88.99.0/24"), "SixToFourRelay"},
 }
 
 // build6to4 creates a 6to4 address (2002::/16) embedding the given IPv4.
@@ -219,6 +223,10 @@ func FuzzIsPublicAddr(f *testing.F) {
 	f.Add(addr16(netip.MustParseAddr("3fff::1")))                  // doc new
 	f.Add(addr16(netip.MustParseAddr("5f00::1")))                  // SRv6
 	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::192.168.1.1")))   // nat64 local
+	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::a00:1")))         // nat64Local with 10.0.0.1
+	f.Add(addr16(netip.MustParseAddr("::a00:1")))                   // ipv4Compat with 10.0.0.1
+	f.Add([]byte{192, 88, 99, 1})                                   // sixToFourRelay anycast
+	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::c0a8:101")))      // nat64Local with 192.168.1.1
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var addr netip.Addr
@@ -282,6 +290,27 @@ func FuzzIsPublicAddr(f *testing.F) {
 			for _, br := range independentBlockedRanges {
 				if br.prefix.Addr().Is4() && br.prefix.Contains(serverIP) && result {
 					t.Fatalf("IsPublicAddr returned true for Teredo %s with private server %s (%s)", addr, serverIP, br.name)
+				}
+			}
+		}
+
+		// INDEPENDENT oracle: IPv4-compatible addresses (::/96 embedding)
+		if ipv4Compat.Contains(canonical) && !canonical.IsUnspecified() {
+			b := canonical.As16()
+			// First 12 bytes must be zero for IPv4-compatible
+			allZero := true
+			for i := 0; i < 12; i++ {
+				if b[i] != 0 {
+					allZero = false
+					break
+				}
+			}
+			if allZero {
+				embedded := netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
+				for _, br := range independentBlockedRanges {
+					if br.prefix.Addr().Is4() && br.prefix.Contains(embedded) && result {
+						t.Fatalf("IsPublicAddr returned true for IPv4-compatible %s embedding private %s (%s)", addr, embedded, br.name)
+					}
 				}
 			}
 		}
