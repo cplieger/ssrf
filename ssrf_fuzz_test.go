@@ -299,7 +299,7 @@ func FuzzIsPublicAddr(f *testing.F) {
 			b := canonical.As16()
 			// First 12 bytes must be zero for IPv4-compatible
 			allZero := true
-			for i := 0; i < 12; i++ {
+			for i := range 12 {
 				if b[i] != 0 {
 					allZero = false
 					break
