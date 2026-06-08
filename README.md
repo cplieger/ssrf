@@ -111,6 +111,7 @@ The transport uses **two layers** of IP validation:
 ### Blocked IP Ranges
 
 IPv4 (RFC 6890 + RFC 5737 + RFC 2544):
+
 - RFC 1918 private, loopback, link-local, multicast, unspecified
 - `0.0.0.0/8` (this host), `240.0.0.0/4` (reserved/broadcast)
 - `100.64.0.0/10` (CGNAT, RFC 6598)
@@ -120,6 +121,7 @@ IPv4 (RFC 6890 + RFC 5737 + RFC 2544):
 - `192.88.99.0/24` (deprecated 6to4 relay)
 
 IPv6:
+
 - Loopback, ULA, link-local, multicast, unspecified
 - `100::/64` (Discard-Only, RFC 6666)
 - `2001:2::/48` (Benchmarking, RFC 5180)
@@ -128,6 +130,7 @@ IPv6:
 - `5f00::/16` (SRv6 SIDs, RFC 9602)
 
 IPv6 transition mechanisms (embedded IPv4 extracted and re-validated):
+
 - `2002::/16` (6to4, RFC 3056)
 - `64:ff9b::/96` (NAT64 well-known, RFC 6052)
 - `64:ff9b:1::/48` (NAT64 local, RFC 8215 — blocked outright)
