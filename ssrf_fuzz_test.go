@@ -217,16 +217,16 @@ func FuzzIsPublicAddr(f *testing.F) {
 	}
 
 	// IPv6 non-routable seeds
-	f.Add(addr16(netip.MustParseAddr("100::1")))                   // discard
-	f.Add(addr16(netip.MustParseAddr("2001:2::1")))                // benchmarking6
-	f.Add(addr16(netip.MustParseAddr("2001:db8::1")))              // documentation
-	f.Add(addr16(netip.MustParseAddr("3fff::1")))                  // doc new
-	f.Add(addr16(netip.MustParseAddr("5f00::1")))                  // SRv6
-	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::192.168.1.1")))   // nat64 local
-	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::a00:1")))         // nat64Local with 10.0.0.1
-	f.Add(addr16(netip.MustParseAddr("::a00:1")))                   // ipv4Compat with 10.0.0.1
-	f.Add([]byte{192, 88, 99, 1})                                   // sixToFourRelay anycast
-	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::c0a8:101")))      // nat64Local with 192.168.1.1
+	f.Add(addr16(netip.MustParseAddr("100::1")))                 // discard
+	f.Add(addr16(netip.MustParseAddr("2001:2::1")))              // benchmarking6
+	f.Add(addr16(netip.MustParseAddr("2001:db8::1")))            // documentation
+	f.Add(addr16(netip.MustParseAddr("3fff::1")))                // doc new
+	f.Add(addr16(netip.MustParseAddr("5f00::1")))                // SRv6
+	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::192.168.1.1"))) // nat64 local
+	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::a00:1")))       // nat64Local with 10.0.0.1
+	f.Add(addr16(netip.MustParseAddr("::a00:1")))                // ipv4Compat with 10.0.0.1
+	f.Add([]byte{192, 88, 99, 1})                                // sixToFourRelay anycast
+	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::c0a8:101")))    // nat64Local with 192.168.1.1
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var addr netip.Addr
