@@ -83,11 +83,10 @@ if ssrf.IsPublicAddr(addr) {
 - `WithResolver(Resolver) Option` — inject a custom DNS resolver
 - `WithAllowedPorts(...uint16) Option` — restrict outbound ports (default: 443 only)
 - `WithAllowedSchemes(...string) Option` — configure allowed URL schemes (default: https only)
-- `WithLogger(*slog.Logger) Option` — inject a structured logger for SSRF warnings (default: slog.Default())
 
 ### Structured Errors
 
-All errors returned by `ValidateURL` and `SafeTransport`'s dial function are `*ssrf.Error` with a `Kind` field:
+All errors returned by `ValidateURL`, `SafeTransport`'s dial function, and the redirect policies are `*ssrf.Error` with a `Kind` field:
 
 | Kind | Meaning |
 |------|---------|
@@ -100,6 +99,11 @@ All errors returned by `ValidateURL` and `SafeTransport`'s dial function are `*s
 | `KindDNSFailed` | DNS resolution failed |
 | `KindPolicyDenied` | Custom policy rejected the IP |
 | `KindBadPort` | Port is not in the allowed set |
+| `KindTooManyRedirects` | Redirect chain exceeded the hop limit |
+
+When a redirect is blocked because the target URL failed validation, the policy
+propagates the underlying `Kind` (e.g. `KindBadScheme`), so `errors.As(&ssrf.Error)`
+on a `CheckRedirect` error reports the real reason rather than a blanket value.
 
 ### Defense-in-Depth: Dialer.Control Hook
 
@@ -107,6 +111,12 @@ The transport uses **two layers** of IP validation:
 
 1. **Resolve-once** — DNS is resolved once, all IPs validated, then the dialer connects to the literal IP (prevents DNS rebinding via TOCTOU).
 2. **`net.Dialer.Control` hook** — validates the actually-connected IP at socket creation time, after the OS has resolved the address but before the TCP handshake. This mirrors the canonical pattern from [doyensec/safeurl](https://github.com/doyensec/safeurl), [Stripe smokescreen](https://github.com/stripe/smokescreen), and [mccutchen/safedialer](https://github.com/mccutchen/safedialer).
+
+Two hardening details protect this pairing. The dialer's `ControlContext` is cleared before the SSRF `Control` hook is installed, because a non-nil `ControlContext` takes precedence in `net.Dialer` and a caller-supplied one (via `WithDialer`) would otherwise bypass the socket-time check. And at most 8 already-validated IPs are dialed per host (`maxDialIPs`), which bounds dial time against a resolver that returns many valid-but-blackholed IPs, without ever skipping validation.
+
+### Logging
+
+The library logs through `log/slog`'s default logger (`slog.Default()`); there is no logger to inject. Each enforcement rejection emits a single `Warn` line (`ssrf blocked`, `ssrf dial blocked`, `ssrf control blocked`, `ssrf redirect blocked`) with a bounded snake_case `reason` attribute (`non_public_ip`, `bad_port`, `too_many_redirects`, and so on) suitable for dashboard aggregation by reason. `IsPublicHost` is a silent predicate: it returns the same allow/deny decision as the enforcement path but emits no log, so you can pre-filter hosts without generating spurious `ssrf blocked` events.
 
 ### Blocked IP Ranges
 

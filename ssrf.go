@@ -23,18 +23,31 @@ package ssrf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
 const schemeHTTPS = "https"
+
+// maxRedirects is the maximum number of redirect hops a SafeRedirectPolicy
+// will follow before refusing further redirects.
+const maxRedirects = 10
+
+// maxDialIPs caps how many already-validated resolved IPs the dialer will
+// attempt, bounding total dial time against an attacker-controlled resolver
+// returning many policy-passing IPs that all blackhole. Every resolved IP is
+// still validated before dialing (fail-closed); this only limits dial attempts
+// among the validated set. Defense-in-depth, matching smokescreen/safeurl.
+const maxDialIPs = 8
 
 // ErrorKind classifies SSRF validation failures. Consumers can use
 // errors.As(*Error) and switch on Kind for programmatic handling,
@@ -60,6 +73,8 @@ const (
 	KindPolicyDenied
 	// KindBadPort indicates the port is not in the allowed set.
 	KindBadPort
+	// KindTooManyRedirects indicates a redirect chain exceeded the hop limit.
+	KindTooManyRedirects
 )
 
 // Error is a structured SSRF validation error with a machine-readable Kind.
@@ -104,7 +119,6 @@ type transportConfig struct {
 	policy       Policy
 	dialer       *net.Dialer
 	resolver     Resolver
-	logger       *slog.Logger
 	allowedPorts map[uint16]struct{}
 	schemes      map[string]struct{}
 }
@@ -120,20 +134,14 @@ func WithPolicy(p Policy) Option {
 	}
 }
 
-// WithLogger sets a structured logger for SSRF validation warnings.
-// A nil logger is ignored (slog.Default() is retained).
-func WithLogger(l *slog.Logger) Option {
-	return func(c *transportConfig) {
-		if l != nil {
-			c.logger = l
-		}
-	}
-}
-
 // WithDialer sets a custom [net.Dialer] used for outbound connections.
 // The dialer's DialContext is wrapped with SSRF-safe DNS resolution;
 // callers can customize Timeout, KeepAlive, and other dialer fields.
 // A nil dialer is ignored (the default dialer is retained).
+//
+// The dialer's Control hook is always overwritten with the SSRF socket-time
+// IP re-validation hook and cannot be supplied by the caller; this is the
+// defense-in-depth layer against DNS rebinding and must not be bypassed.
 func WithDialer(d *net.Dialer) Option {
 	return func(c *transportConfig) {
 		if d != nil {
@@ -170,9 +178,18 @@ func WithAllowedPorts(ports ...uint16) Option {
 	}
 }
 
-// WithAllowedSchemes sets the URL schemes that [ValidateURLWithOptions] accepts.
+// WithAllowedSchemes sets the URL schemes used by [AllowedSchemes] and
+// [SafeRedirectPolicyWithSchemes]. (ValidateURL itself is HTTPS-only.)
 // By default only "https" is allowed. Mirrors doyensec/safeurl AllowedSchemes.
 // Schemes are compared case-insensitively.
+// Passing no schemes is a no-op: unlike WithAllowedPorts, an empty call does
+// NOT widen the set to "all schemes" -- the HTTPS-only default is retained,
+// since allowing arbitrary schemes would defeat the SSRF posture.
+//
+// NOTE: this option has NO effect when passed to [SafeTransport] -- the
+// transport gates at the IP/port layer only and never inspects the scheme
+// set. Use it with [AllowedSchemes] (feed the result into
+// [SafeRedirectPolicyWithSchemes]) to gate redirect-hop schemes.
 func WithAllowedSchemes(schemes ...string) Option {
 	return func(c *transportConfig) {
 		if len(schemes) == 0 {
@@ -191,44 +208,46 @@ func WithAllowedSchemes(schemes ...string) Option {
 // link-local addresses. Hostnames without dots (bare names like
 // "localhost" or "internal") are also rejected.
 func ValidateURL(raw string) error {
-	return validateURLWithSchemes(raw, nil, slog.Default())
+	return validateURLWithSchemes(raw, nil)
 }
 
 // validateURLWithSchemes validates a URL against a set of allowed schemes.
 // If schemes is nil, only HTTPS is allowed.
-func validateURLWithSchemes(raw string, schemes map[string]struct{}, log *slog.Logger) error {
-	if log == nil {
-		log = slog.Default()
-	}
+func validateURLWithSchemes(raw string, schemes map[string]struct{}) error {
 	u, err := url.Parse(raw)
 	if err != nil {
+		slog.Default().Warn("ssrf blocked", "reason", "invalid_url", "error", err)
 		return ssrfErr(KindInvalidURL, "", "invalid URL", err)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if schemes == nil {
 		if scheme != schemeHTTPS {
-			log.Warn("ssrf blocked", "reason", "scheme", "scheme", u.Scheme)
+			slog.Default().Warn("ssrf blocked", "reason", "scheme", "scheme", u.Scheme)
 			return ssrfErr(KindBadScheme, "", fmt.Sprintf("URL scheme must be https, got %q", u.Scheme), nil)
 		}
 	} else {
 		if _, ok := schemes[scheme]; !ok {
-			log.Warn("ssrf blocked", "reason", "scheme", "scheme", u.Scheme)
+			slog.Default().Warn("ssrf blocked", "reason", "scheme", "scheme", u.Scheme)
 			return ssrfErr(KindBadScheme, "", fmt.Sprintf("URL scheme %q is not allowed", u.Scheme), nil)
 		}
 	}
 	host := u.Hostname()
 	if host == "" {
-		log.Warn("ssrf blocked", "reason", "empty_host")
+		slog.Default().Warn("ssrf blocked", "reason", "empty_host")
 		return ssrfErr(KindEmptyHost, "", "URL has empty host", nil)
 	}
-	return validateHostWithLogger(host, log)
+	return validateHost(host)
 }
 
 // IsPublicHost checks that a hostname is not a private/loopback/CGNAT address.
 // Returns false for localhost, bare hostnames, RFC 1918/link-local IPs,
 // and RFC 6598 shared address space.
+//
+// As a predicate it is SILENT: unlike the [ValidateURL] enforcement path, a
+// false result emits no "ssrf blocked" log line, so callers can probe host
+// publicness (e.g. pre-filtering a list) without polluting block dashboards.
 func IsPublicHost(host string) bool {
-	return validateHost(host) == nil
+	return hostValidationError(host) == nil
 }
 
 // IsPublicAddr reports whether addr is a globally routable unicast address.
@@ -241,32 +260,19 @@ func IsPublicAddr(addr netip.Addr) bool {
 	return isPublicAddr(addr)
 }
 
-// validateHost rejects hostnames that resolve to non-public addresses.
-func validateHost(host string) error {
-	return validateHostWithLogger(host, slog.Default())
-}
-
-// validateHostWithLogger rejects hostnames that resolve to non-public addresses,
-// logging warnings via the provided logger.
-func validateHostWithLogger(host string, log *slog.Logger) error {
-	if log == nil {
-		log = slog.Default()
-	}
-	if host == "" {
-		return ssrfErr(KindEmptyHost, "", "empty host", nil)
-	}
-
+// hostValidationError returns the SSRF *Error describing why host is not a
+// public hostname, or nil if it is public. It performs NO logging — it is the
+// shared classification core. The enforcement wrapper [validateHost] logs a
+// "ssrf blocked" Warn on rejection; the [IsPublicHost] predicate uses this core
+// directly and stays silent (a query is not a block).
+func hostValidationError(host string) *Error {
 	// Strip all trailing dots (FQDN notation).
-	for strings.HasSuffix(host, ".") {
-		host = host[:len(host)-1]
-	}
+	host = strings.TrimRight(host, ".")
 	if host == "" {
-		log.Warn("ssrf blocked", "reason", "empty_host")
-		return ssrfErr(KindEmptyHost, host, "empty host after trimming trailing dots", nil)
+		return ssrfErr(KindEmptyHost, host, "empty host", nil)
 	}
 
 	if strings.EqualFold(host, "localhost") {
-		log.Warn("ssrf blocked", "host", host, "reason", "localhost")
 		return ssrfErr(KindLocalhost, host, "URL points to localhost", nil)
 	}
 
@@ -274,7 +280,6 @@ func validateHostWithLogger(host string, log *slog.Logger) error {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		addr = addr.Unmap()
 		if !isPublicAddr(addr) {
-			log.Warn("ssrf blocked", "host", host, "reason", "non_public_ip")
 			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL points to non-public IP: %s", host), nil)
 		}
 		return nil
@@ -282,10 +287,56 @@ func validateHostWithLogger(host string, log *slog.Logger) error {
 
 	// Not an IP; must be a hostname with at least one dot.
 	if !strings.Contains(host, ".") {
-		log.Warn("ssrf blocked", "host", host, "reason", "bare_hostname")
 		return ssrfErr(KindBareHostname, host, fmt.Sprintf("URL points to bare hostname: %s", host), nil)
 	}
 	return nil
+}
+
+// reasonLabel maps an ErrorKind to the bounded, low-cardinality "reason"
+// label used on every block log line so Loki/Grafana can aggregate block
+// events by reason. Keep this switch in sync with the Kinds the package
+// emits: any new Kind added to ErrorKind must get a case here, otherwise
+// it silently degrades to "blocked". Never embed hosts/IPs in this label.
+func reasonLabel(kind ErrorKind) string {
+	switch kind {
+	case KindInvalidURL:
+		return "invalid_url"
+	case KindBadScheme:
+		return "scheme"
+	case KindEmptyHost:
+		return "empty_host"
+	case KindLocalhost:
+		return "localhost"
+	case KindBareHostname:
+		return "bare_hostname"
+	case KindNonPublicIP:
+		return "non_public_ip"
+	case KindDNSFailed:
+		return "dns_failed"
+	case KindPolicyDenied:
+		return "policy_denied"
+	case KindBadPort:
+		return "bad_port"
+	case KindTooManyRedirects:
+		return "too_many_redirects"
+	default:
+		return "blocked"
+	}
+}
+
+// validateHost is the enforcement wrapper around [hostValidationError]: on
+// rejection it emits a "ssrf blocked" Warn (the ValidateURL / redirect-policy
+// path, where a block is a real security event) and returns the error; it
+// returns nil for a public host. Predicate callers use hostValidationError
+// directly to stay silent — see [IsPublicHost].
+func validateHost(host string) error {
+	verr := hostValidationError(host)
+	if verr == nil {
+		return nil
+	}
+	reason := reasonLabel(verr.Kind)
+	slog.Default().Warn("ssrf blocked", "host", verr.Host, "reason", reason)
+	return verr
 }
 
 // --- Blocked ranges ---
@@ -310,6 +361,7 @@ var (
 	documentation = netip.MustParsePrefix("2001:db8::/32") // RFC 3849 Documentation
 	doc6New       = netip.MustParsePrefix("3fff::/20")     // RFC 9637 Documentation (2024)
 	srv6SIDs      = netip.MustParsePrefix("5f00::/16")     // RFC 9602 SRv6 SIDs (2024)
+	siteLocal     = netip.MustParsePrefix("fec0::/10")     // RFC 3879 deprecated site-local
 )
 
 // IPv6 transition mechanism prefixes.
@@ -345,7 +397,7 @@ func isPublicAddr(addr netip.Addr) bool {
 		return false
 	}
 
-	return hasPublicEmbeddedIPv4(addr)
+	return embeddedIPv4IsPublic(addr)
 }
 
 // isNonRoutableRange checks documentation/benchmarking/discard ranges.
@@ -361,7 +413,7 @@ func isNonRoutableRange(addr netip.Addr) bool {
 			return true
 		}
 	}
-	if addr.Is6() && !addr.Is4In6() {
+	if addr.Is6() {
 		// nat64Local (RFC 8215 64:ff9b:1::/48) is blocked outright: its
 		// RFC 6052 /48 IPv4-embedding offset differs from the well-known
 		// /96, so extracting bytes 12-15 would risk an SSRF bypass.
@@ -370,6 +422,7 @@ func isNonRoutableRange(addr netip.Addr) bool {
 			documentation.Contains(addr) ||
 			doc6New.Contains(addr) ||
 			srv6SIDs.Contains(addr) ||
+			siteLocal.Contains(addr) ||
 			nat64Local.Contains(addr) {
 			return true
 		}
@@ -377,9 +430,9 @@ func isNonRoutableRange(addr netip.Addr) bool {
 	return false
 }
 
-// hasPublicEmbeddedIPv4 validates IPv4 addresses embedded in IPv6 transition
+// embeddedIPv4IsPublic validates IPv4 addresses embedded in IPv6 transition
 // mechanism wrappers (6to4, NAT64, Teredo, IPv4-compatible).
-func hasPublicEmbeddedIPv4(addr netip.Addr) bool {
+func embeddedIPv4IsPublic(addr netip.Addr) bool {
 	if sixToFour.Contains(addr) {
 		b := addr.As16()
 		embedded := netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})
@@ -420,13 +473,38 @@ func hasPublicEmbeddedIPv4(addr netip.Addr) bool {
 func SafeRedirectPolicy(
 	next func(req *http.Request, via []*http.Request) error,
 ) func(req *http.Request, via []*http.Request) error {
+	return SafeRedirectPolicyWithSchemes(nil, next)
+}
+
+// SafeRedirectPolicyWithSchemes returns a redirect policy that validates
+// against the given allowed schemes (for use with [WithAllowedSchemes]).
+//
+// Scheme-set semantics: a nil schemes map means HTTPS-only; a non-nil but
+// empty map blocks every scheme (fail-closed) and rejects all redirects.
+// Source a safe non-empty set from [AllowedSchemes] rather than building
+// the map inline -- unlike WithAllowedSchemes, an empty map here is not
+// widened to the HTTPS default.
+func SafeRedirectPolicyWithSchemes(
+	schemes map[string]struct{},
+	next func(req *http.Request, via []*http.Request) error,
+) func(req *http.Request, via []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return ssrfErr(KindNonPublicIP, "", "stopped after 10 redirects", nil)
+		if len(via) >= maxRedirects {
+			slog.Default().Warn("ssrf redirect blocked",
+				"reason", "too_many_redirects", "hops", len(via))
+			return ssrfErr(KindTooManyRedirects, "", fmt.Sprintf("stopped after %d redirects", maxRedirects), nil)
 		}
-		if err := ValidateURL(req.URL.String()); err != nil {
-			slog.Default().Warn("ssrf redirect blocked", "url", req.URL.Redacted(), "reason", err.Error())
-			return ssrfErr(KindNonPublicIP, req.URL.Hostname(), "redirect blocked (SSRF): "+err.Error(), err)
+		if err := validateURLWithSchemes(req.URL.String(), schemes); err != nil {
+			// Propagate the inner Kind so a caller inspecting
+			// errors.As(&ssrf.Error).Kind sees the real reason (bad scheme,
+			// empty host, non-public IP, ...) rather than a blanket value.
+			kind := KindNonPublicIP
+			if ie, ok := errors.AsType[*Error](err); ok {
+				kind = ie.Kind
+			}
+			slog.Default().Warn("ssrf redirect blocked",
+				"url", req.URL.Redacted(), "reason", reasonLabel(kind), "error", err)
+			return ssrfErr(kind, req.URL.Hostname(), "redirect blocked (SSRF): "+err.Error(), err)
 		}
 		if next != nil {
 			return next(req, via)
@@ -435,25 +513,25 @@ func SafeRedirectPolicy(
 	}
 }
 
-// SafeRedirectPolicyWithSchemes returns a redirect policy that validates
-// against the given allowed schemes (for use with [WithAllowedSchemes]).
-func SafeRedirectPolicyWithSchemes(
-	schemes map[string]struct{},
-	next func(req *http.Request, via []*http.Request) error,
-) func(req *http.Request, via []*http.Request) error {
-	return func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return ssrfErr(KindNonPublicIP, "", "stopped after 10 redirects", nil)
-		}
-		if err := validateURLWithSchemes(req.URL.String(), schemes, slog.Default()); err != nil {
-			slog.Default().Warn("ssrf redirect blocked", "url", req.URL.Redacted(), "reason", err.Error())
-			return ssrfErr(KindNonPublicIP, req.URL.Hostname(), "redirect blocked (SSRF): "+err.Error(), err)
-		}
-		if next != nil {
-			return next(req, via)
-		}
+// checkAllowedPort verifies portStr is one of the permitted ports. A nil
+// allowedPorts allows all ports. stage ("control" or "dial") selects the
+// log/message context so both validation layers share one definition while
+// keeping their distinct diagnostics. Returns a KindBadPort error on an
+// unparseable or disallowed port.
+func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage string) error {
+	if allowedPorts == nil {
 		return nil
 	}
+	p, parseErr := strconv.ParseUint(portStr, 10, 16)
+	if parseErr != nil {
+		slog.Default().Warn("ssrf "+stage+" blocked", "host", host, "port", portStr, "reason", "bad_port")
+		return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF %s: invalid port %q", stage, portStr), parseErr)
+	}
+	if _, ok := allowedPorts[uint16(p)]; !ok {
+		slog.Default().Warn("ssrf "+stage+" blocked", "host", host, "port", uint16(p), "reason", "port_not_allowed")
+		return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF %s: port %d is not allowed", stage, p), nil)
+	}
+	return nil
 }
 
 // safeControl returns a net.Dialer Control function that validates the
@@ -461,39 +539,33 @@ func SafeRedirectPolicyWithSchemes(
 // canonical defense-in-depth against DNS rebinding/TOCTOU, mirroring
 // doyensec/safeurl and Stripe smokescreen's approach. The Control hook
 // fires after DNS resolution but before the TCP handshake completes.
-func safeControl(policy Policy, allowedPorts map[uint16]struct{}, log *slog.Logger) func(network, address string, c syscall.RawConn) error {
-	if log == nil {
-		log = slog.Default()
-	}
+func safeControl(policy Policy, allowedPorts map[uint16]struct{}) func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, _ syscall.RawConn) error {
 		if network != "tcp4" && network != "tcp6" {
+			slog.Default().Warn("ssrf control blocked", "network", network, "reason", "disallowed_network")
 			return ssrfErr(KindNonPublicIP, "", fmt.Sprintf("SSRF control: disallowed network %q", network), nil)
 		}
 
 		host, portStr, err := net.SplitHostPort(address)
 		if err != nil {
+			slog.Default().Warn("ssrf control blocked", "address", address, "reason", "invalid_address")
 			return ssrfErr(KindInvalidURL, "", fmt.Sprintf("SSRF control: invalid address %q", address), err)
 		}
 
 		// Validate port at dial time.
-		if allowedPorts != nil {
-			port, parseErr := netip.ParseAddrPort(net.JoinHostPort(host, portStr))
-			if parseErr != nil {
-				return ssrfErr(KindBadPort, "", fmt.Sprintf("SSRF control: cannot parse port in %q", address), parseErr)
-			}
-			if _, ok := allowedPorts[port.Port()]; !ok {
-				return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF control: port %d is not allowed", port.Port()), nil)
-			}
+		if err := checkAllowedPort(allowedPorts, host, portStr, "control"); err != nil {
+			return err
 		}
 
 		// Validate IP at dial time (defense-in-depth).
 		addr, parseErr := netip.ParseAddr(host)
 		if parseErr != nil {
+			slog.Default().Warn("ssrf control blocked", "ip", host, "reason", "unparseable_ip")
 			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF control: cannot parse IP %q", host), parseErr)
 		}
 		addr = addr.Unmap()
 		if !policy(addr) {
-			log.Warn("ssrf control blocked",
+			slog.Default().Warn("ssrf control blocked",
 				"ip", addr.String(), "reason", "non_public_ip")
 			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF control: IP %s is not public", addr), nil)
 		}
@@ -504,37 +576,34 @@ func safeControl(policy Policy, allowedPorts map[uint16]struct{}, log *slog.Logg
 // safeDialContext returns a DialContext function that resolves DNS and
 // validates all resolved IPs against the given policy before connecting.
 // The dialer also has a Control hook for defense-in-depth validation.
-func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allowedPorts map[uint16]struct{}, log *slog.Logger) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	if log == nil {
-		log = slog.Default()
-	}
-	// Install the Control hook for defense-in-depth.
-	dialer.Control = safeControl(policy, allowedPorts, log)
+func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allowedPorts map[uint16]struct{}) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	// Install the socket-time hook for defense-in-depth. Clear ControlContext
+	// first: when set it takes precedence over Control (net.Dialer semantics),
+	// which would silently bypass this layer if a caller supplied it via WithDialer.
+	dialer.ControlContext = nil
+	dialer.Control = safeControl(policy, allowedPorts)
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
+			slog.Default().Warn("ssrf dial blocked", "address", addr, "reason", "invalid_address")
 			return nil, ssrfErr(KindInvalidURL, "", fmt.Sprintf("SSRF dial: invalid address %q", addr), err)
 		}
 
 		// Validate port at resolve time (fail fast).
-		if allowedPorts != nil {
-			addrPort, parseErr := netip.ParseAddrPort(net.JoinHostPort("127.0.0.1", port))
-			if parseErr != nil {
-				return nil, ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF dial: invalid port %q", port), parseErr)
-			}
-			if _, ok := allowedPorts[addrPort.Port()]; !ok {
-				return nil, ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF dial: port %s is not allowed", port), nil)
-			}
+		if portErr := checkAllowedPort(allowedPorts, host, port, "dial"); portErr != nil {
+			return nil, portErr
 		}
 
 		dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
 		cancel()
 		if err != nil {
+			slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "dns_failed", "error", err)
 			return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: DNS lookup failed for %q", host), err)
 		}
 		if len(ips) == 0 {
+			slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "no_ips_resolved")
 			return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: no IPs resolved for %q", host), nil)
 		}
 
@@ -543,15 +612,23 @@ func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allow
 		for i := range ips {
 			safe[i] = ips[i].Unmap()
 			if !policy(safe[i]) {
-				log.Warn("ssrf dial blocked",
+				slog.Default().Warn("ssrf dial blocked",
 					"host", host, "resolved_ip", safe[i].String(), "reason", "non_public_ip")
 				return nil, ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
 			}
 		}
 
 		var lastErr error
-		for _, ip := range safe {
+		dialList := safe
+		if len(dialList) > maxDialIPs {
+			slog.Default().Warn("ssrf dial capped",
+				"host", host, "resolved", len(safe), "dialing", maxDialIPs)
+			dialList = dialList[:maxDialIPs]
+		}
+		for _, ip := range dialList {
 			if ctx.Err() != nil {
+				slog.Default().Debug("ssrf dial aborted",
+					"host", host, "reason", "context_cancelled", "error", ctx.Err())
 				return nil, fmt.Errorf("SSRF dial: context cancelled: %w", ctx.Err())
 			}
 			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
@@ -560,13 +637,15 @@ func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allow
 			}
 			lastErr = dialErr
 		}
-		return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(ips), host, lastErr)
+		slog.Default().Debug("ssrf dial failed",
+			"host", host, "ips_tried", len(dialList), "error", lastErr)
+		return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(dialList), host, lastErr)
 	}
 }
 
 // SafeTransport returns an *http.Transport hardened against SSRF and
 // DNS rebinding. Use [WithPolicy], [WithDialer], [WithResolver],
-// [WithAllowedPorts], [WithAllowedSchemes], and [WithLogger] to customize.
+// [WithAllowedPorts], and [WithAllowedSchemes] to customize.
 func SafeTransport(opts ...Option) *http.Transport {
 	cfg := transportConfig{
 		policy: isPublicAddr,
@@ -575,7 +654,6 @@ func SafeTransport(opts ...Option) *http.Transport {
 			KeepAlive: 30 * time.Second,
 		},
 		resolver:     net.DefaultResolver,
-		logger:       slog.Default(),
 		allowedPorts: map[uint16]struct{}{443: {}},
 		schemes:      map[string]struct{}{schemeHTTPS: {}},
 	}
@@ -585,7 +663,7 @@ func SafeTransport(opts ...Option) *http.Transport {
 		}
 	}
 	return &http.Transport{
-		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts, cfg.logger),
+		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts),
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -597,7 +675,8 @@ func SafeTransport(opts ...Option) *http.Transport {
 }
 
 // AllowedSchemes returns the scheme set from the transport config, for use
-// with [SafeRedirectPolicyWithSchemes]. Returns nil if only HTTPS is allowed.
+// with [SafeRedirectPolicyWithSchemes]. The default (no options) is the
+// HTTPS-only set {"https"}; the result is always non-nil.
 func AllowedSchemes(opts ...Option) map[string]struct{} {
 	cfg := transportConfig{
 		schemes: map[string]struct{}{schemeHTTPS: {}},

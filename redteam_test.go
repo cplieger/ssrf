@@ -1,10 +1,8 @@
 package ssrf
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -15,7 +13,7 @@ import (
 )
 
 // =============================================================================
-// REFACTOR PROBES: ErrorKind rename (Err* -> Kind*), WithLogger, functional opts
+// REFACTOR PROBES: ErrorKind rename (Err* -> Kind*), functional opts
 // =============================================================================
 
 // Verify errors.As(*Error) + Kind switch still works after rename.
@@ -59,7 +57,7 @@ func TestRefactor_ErrorKind_BadPort(t *testing.T) {
 	dial := safeDialContext(
 		&net.Dialer{Timeout: 2 * time.Second},
 		isPublicAddr, net.DefaultResolver,
-		map[uint16]struct{}{443: {}}, slog.Default(),
+		map[uint16]struct{}{443: {}},
 	)
 	_, err := dial(context.Background(), "tcp", "8.8.8.8:80")
 	if err == nil {
@@ -71,30 +69,6 @@ func TestRefactor_ErrorKind_BadPort(t *testing.T) {
 	}
 	if se.Kind != KindBadPort {
 		t.Errorf("got Kind %d, want KindBadPort (%d)", se.Kind, KindBadPort)
-	}
-}
-
-// WithLogger nil-safe: no panic, uses slog.Default().
-func TestRefactor_WithLogger_nil_safe(t *testing.T) {
-	t.Parallel()
-	tr := SafeTransport(WithLogger(nil))
-	if tr == nil || tr.DialContext == nil {
-		t.Fatal("SafeTransport(WithLogger(nil)) returned nil or nil DialContext")
-	}
-	// Attempt a dial that triggers a log - should not panic.
-	_, _ = tr.DialContext(context.Background(), "tcp", "127.0.0.1:443")
-}
-
-// WithLogger threads to safeControl and safeDialContext.
-func TestRefactor_WithLogger_threads_to_control_and_dial(t *testing.T) {
-	t.Parallel()
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
-	tr := SafeTransport(WithLogger(log), WithResolver(r))
-	_, _ = tr.DialContext(context.Background(), "tcp", "evil.com:443")
-	if !strings.Contains(buf.String(), "ssrf") {
-		t.Errorf("custom logger didn't capture ssrf log: %q", buf.String())
 	}
 }
 
@@ -115,7 +89,7 @@ func TestRefactor_SafeRedirectPolicy_logs_default(t *testing.T) {
 }
 
 // Verify New* constructors (SafeTransport) default parity:
-// Default = HTTPS only, port 443 only, isPublicAddr policy, non-nil logger.
+// Default = HTTPS only, port 443 only, isPublicAddr policy.
 func TestRefactor_SafeTransport_defaults(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport() // no options
@@ -143,24 +117,21 @@ func TestRefactor_SafeTransport_defaults(t *testing.T) {
 // Option order doesn't matter.
 func TestRefactor_Option_order_independence(t *testing.T) {
 	t.Parallel()
-	var buf1, buf2 bytes.Buffer
-	log1 := slog.New(slog.NewTextHandler(&buf1, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	log2 := slog.New(slog.NewTextHandler(&buf2, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
 
-	// Order A: Logger, Resolver, Ports
-	tr1 := SafeTransport(WithLogger(log1), WithResolver(r), WithAllowedPorts(443))
-	_, _ = tr1.DialContext(context.Background(), "tcp", "evil.com:443")
+	// Order A: Resolver, Ports
+	tr1 := SafeTransport(WithResolver(r), WithAllowedPorts(443))
+	_, err1 := tr1.DialContext(context.Background(), "tcp", "evil.com:443")
 
-	// Order B: Ports, Resolver, Logger
-	tr2 := SafeTransport(WithAllowedPorts(443), WithResolver(r), WithLogger(log2))
-	_, _ = tr2.DialContext(context.Background(), "tcp", "evil.com:443")
+	// Order B: Ports, Resolver
+	tr2 := SafeTransport(WithAllowedPorts(443), WithResolver(r))
+	_, err2 := tr2.DialContext(context.Background(), "tcp", "evil.com:443")
 
-	if !strings.Contains(buf1.String(), "ssrf") {
-		t.Error("order A: logger didn't capture ssrf log")
+	if err1 == nil {
+		t.Error("order A: private IP from resolver was not blocked")
 	}
-	if !strings.Contains(buf2.String(), "ssrf") {
-		t.Error("order B: logger didn't capture ssrf log")
+	if err2 == nil {
+		t.Error("order B: private IP from resolver was not blocked")
 	}
 }
 
@@ -296,7 +267,7 @@ func TestSecurity_6to4_extraction(t *testing.T) {
 // Dial-time Control re-validation.
 func TestSecurity_Control_revalidation(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	privates := []string{
 		"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1",
 		"169.254.1.1", "100.64.0.1", "0.1.2.3", "240.0.0.1",
@@ -345,7 +316,7 @@ func TestSecurity_scheme_allowlist(t *testing.T) {
 		"dict://evil.com:11211/stat",
 	}
 	for _, u := range badSchemes {
-		err := validateURLWithSchemes(u, schemes, slog.Default())
+		err := validateURLWithSchemes(u, schemes)
 		if err == nil {
 			t.Errorf("BYPASS scheme allowed: %s", u)
 		}

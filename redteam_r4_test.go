@@ -2,8 +2,6 @@ package ssrf
 
 import (
 	"context"
-	"log/slog"
-	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -12,59 +10,8 @@ import (
 
 // =============================================================================
 // ROUND 4: FINAL CONVERGENCE RED-TEAM
-// Verifies round-3 nil-logger fix and attempts novel bypasses.
+// Attempts novel bypasses against the blocked-range and transition-mechanism logic.
 // =============================================================================
-
-// --- NIL LOGGER GUARD VERIFICATION (all 4 internal funcs) ---
-
-func TestR4_nilLogger_validateURLWithSchemes(t *testing.T) {
-	t.Parallel()
-	// Must not panic with nil logger.
-	err := validateURLWithSchemes("https://10.0.0.1/x", nil, nil)
-	if err == nil {
-		t.Error("expected block for private IP with nil logger")
-	}
-	// Scheme mismatch path.
-	err = validateURLWithSchemes("ftp://example.com", nil, nil)
-	if err == nil {
-		t.Error("expected block for ftp scheme with nil logger")
-	}
-}
-
-func TestR4_nilLogger_validateHostWithLogger(t *testing.T) {
-	t.Parallel()
-	err := validateHostWithLogger("127.0.0.1", nil)
-	if err == nil {
-		t.Error("expected block for loopback with nil logger")
-	}
-	err = validateHostWithLogger("localhost", nil)
-	if err == nil {
-		t.Error("expected block for localhost with nil logger")
-	}
-}
-
-func TestR4_nilLogger_safeControl(t *testing.T) {
-	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
-	// Block private.
-	err := ctrl("tcp4", "192.168.1.1:443", nil)
-	if err == nil {
-		t.Error("safeControl nil logger failed to block private IP")
-	}
-}
-
-func TestR4_nilLogger_safeDialContext(t *testing.T) {
-	t.Parallel()
-	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
-	d := &net.Dialer{Timeout: 2 * time.Second}
-	dial := safeDialContext(d, isPublicAddr, r, map[uint16]struct{}{443: {}}, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, err := dial(ctx, "tcp", "evil.test:443")
-	if err == nil {
-		t.Error("safeDialContext nil logger failed to block private IP")
-	}
-}
 
 // --- BYPASS ATTACKS: MAPPED CGNAT + ALL BLOCKED RANGES ---
 
@@ -234,7 +181,7 @@ func TestR4_dialControl_revalidation_rebind(t *testing.T) {
 	t.Parallel()
 	// Simulate DNS rebinding: resolver returns public IP, but the Control hook
 	// sees a private IP (simulated by calling Control directly).
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	// Control should block if actual IP is private.
 	privateIPs := []string{"10.0.0.1:443", "192.168.1.1:80", "127.0.0.1:443", "100.64.0.1:443"}
 	for _, addr := range privateIPs {
@@ -261,7 +208,7 @@ func TestR4_scheme_caseFolding_exhaustive(t *testing.T) {
 		"data:text/html,<script>",
 	}
 	for _, u := range blocked {
-		err := validateURLWithSchemes(u, schemes, slog.Default())
+		err := validateURLWithSchemes(u, schemes)
 		if err == nil {
 			t.Errorf("BYPASS: scheme %q passed validation", u)
 		}
@@ -274,7 +221,7 @@ func TestR4_scheme_caseFolding_exhaustive(t *testing.T) {
 		"Http://example.com/ok",
 	}
 	for _, u := range allowed {
-		err := validateURLWithSchemes(u, schemes, slog.Default())
+		err := validateURLWithSchemes(u, schemes)
 		if err != nil {
 			t.Errorf("scheme %q should be allowed, got: %v", u, err)
 		}
@@ -305,7 +252,7 @@ func TestR4_dnsRebinding_controlHookDefense(t *testing.T) {
 	t.Parallel()
 	// The Control hook validates at socket time. If somehow the dialer
 	// connects to a different IP, Control blocks it.
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	// Simulate rebind: original resolve was 8.8.8.8 but connection goes to 10.0.0.1
 	err := ctrl("tcp4", "10.0.0.1:443", nil)
 	if err == nil {
@@ -333,24 +280,6 @@ func TestR4_concurrent_dial_race(t *testing.T) {
 		})
 	}
 	wg.Wait()
-}
-
-// --- WithLogger nil guard ---
-
-func TestR4_WithLogger_nil_retains_default(t *testing.T) {
-	t.Parallel()
-	// WithLogger(nil) should be ignored, retaining slog.Default().
-	tr := SafeTransport(WithLogger(nil))
-	if tr == nil {
-		t.Fatal("SafeTransport with WithLogger(nil) returned nil")
-	}
-	// Exercise the logging path with a blocked IP.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_, err := tr.DialContext(ctx, "tcp", "10.0.0.1:443")
-	if err == nil {
-		t.Error("WithLogger(nil) broke default policy")
-	}
 }
 
 // --- WithPolicy nil guard ---
