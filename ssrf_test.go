@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -229,6 +228,57 @@ func TestSafeRedirectPolicy_stops_after_10_redirects(t *testing.T) {
 	}
 }
 
+// The hop-cap denial must report KindTooManyRedirects, not a blanket
+// KindNonPublicIP — "stopped after N redirects" is not an IP condition.
+func TestSafeRedirectPolicy_hop_cap_kind(t *testing.T) {
+	t.Parallel()
+	policy := SafeRedirectPolicy(nil)
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://example.com/file", http.NoBody)
+	via := make([]*http.Request, maxRedirects)
+	err := policy(req, via)
+
+	var ssrfErr *Error
+	if !errors.As(err, &ssrfErr) {
+		t.Fatalf("SafeRedirectPolicy() error = %v, want *ssrf.Error", err)
+	}
+	if ssrfErr.Kind != KindTooManyRedirects {
+		t.Errorf("hop-cap denial Kind = %v, want KindTooManyRedirects", ssrfErr.Kind)
+	}
+}
+
+// A redirect blocked because the target URL failed validation must propagate
+// the inner Kind (e.g. KindBadScheme for an http downgrade) so callers
+// inspecting errors.As(&ssrf.Error).Kind see the real reason.
+func TestSafeRedirectPolicy_propagates_inner_kind(t *testing.T) {
+	t.Parallel()
+	policy := SafeRedirectPolicy(nil)
+	cases := []struct {
+		name string
+		url  string
+		want ErrorKind
+	}{
+		{"http downgrade", "http://example.com/file.txt", KindBadScheme},
+		{"private IP", "https://192.168.1.77/internal", KindNonPublicIP},
+		{"bare hostname", "https://internal/file", KindBareHostname},
+		{"localhost", "https://localhost/file", KindLocalhost},
+		{"empty host", "https:///file", KindEmptyHost},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, tc.url, http.NoBody)
+			err := policy(req, nil)
+			var ssrfErr *Error
+			if !errors.As(err, &ssrfErr) {
+				t.Fatalf("SafeRedirectPolicy(%q) error = %v, want *ssrf.Error", tc.url, err)
+			}
+			if ssrfErr.Kind != tc.want {
+				t.Errorf("SafeRedirectPolicy(%q) Kind = %v, want %v", tc.url, ssrfErr.Kind, tc.want)
+			}
+		})
+	}
+}
+
 // Even when a caller supplies a custom next, the 10-redirect cap must
 // still apply — next could be a trivial passthrough that has no cap.
 func TestSafeRedirectPolicy_caps_redirects_with_custom_next(t *testing.T) {
@@ -400,7 +450,7 @@ func TestValidateURL_ipv4_mapped_ipv6_consistency(t *testing.T) {
 
 func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
 	// 127.0.0.1 is a literal IP that resolves to itself (loopback).
 	_, err := dial(context.Background(), "tcp", "127.0.0.1:443")
 	if err == nil {
@@ -410,7 +460,7 @@ func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 
 func TestSafeDialContext_blocks_private_range(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
 	_, err := dial(context.Background(), "tcp", "192.168.1.1:443")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for private IP")
@@ -419,7 +469,7 @@ func TestSafeDialContext_blocks_private_range(t *testing.T) {
 
 func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
 	_, err := dial(context.Background(), "tcp", "no-port")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for invalid address")
@@ -432,7 +482,7 @@ func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 // with a nil error (which callers would treat as a successful connection).
 func TestSafeDialContext_dns_lookup_error_is_wrapped(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil, slog.Default())
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -803,7 +853,7 @@ func TestIsPublicAddr_mapped_public_allowed(t *testing.T) {
 
 func TestSafeControl_blocks_non_tcp(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	err := ctrl("udp4", "8.8.8.8:443", nil)
 	if err == nil {
 		t.Error("safeControl() = nil, want error for non-TCP network")
@@ -812,7 +862,7 @@ func TestSafeControl_blocks_non_tcp(t *testing.T) {
 
 func TestSafeControl_blocks_private_ip(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	err := ctrl("tcp4", "127.0.0.1:443", nil)
 	if err == nil {
 		t.Error("safeControl() = nil, want error for loopback IP")
@@ -825,7 +875,7 @@ func TestSafeControl_blocks_private_ip(t *testing.T) {
 
 func TestSafeControl_allows_public_ip(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	err := ctrl("tcp4", "8.8.8.8:443", nil)
 	if err != nil {
 		t.Errorf("safeControl() = %v, want nil for public IP", err)
@@ -839,7 +889,7 @@ func TestSafeControl_allows_public_ip(t *testing.T) {
 func TestSafeControl_blocks_disallowed_port(t *testing.T) {
 	t.Parallel()
 	ports := map[uint16]struct{}{443: {}}
-	ctrl := safeControl(isPublicAddr, ports, slog.Default())
+	ctrl := safeControl(isPublicAddr, ports)
 	err := ctrl("tcp4", "8.8.8.8:80", nil)
 	if err == nil {
 		t.Error("safeControl() = nil, want error for port 80 when only 443 allowed")
@@ -853,7 +903,7 @@ func TestSafeControl_blocks_disallowed_port(t *testing.T) {
 func TestSafeControl_allows_permitted_port(t *testing.T) {
 	t.Parallel()
 	ports := map[uint16]struct{}{443: {}, 8443: {}}
-	ctrl := safeControl(isPublicAddr, ports, slog.Default())
+	ctrl := safeControl(isPublicAddr, ports)
 	err := ctrl("tcp4", "8.8.8.8:443", nil)
 	if err != nil {
 		t.Errorf("safeControl() = %v, want nil for allowed port 443", err)
@@ -866,7 +916,7 @@ func TestSafeControl_allows_permitted_port(t *testing.T) {
 
 func TestSafeControl_nil_ports_allows_all(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil, slog.Default())
+	ctrl := safeControl(isPublicAddr, nil)
 	err := ctrl("tcp4", "8.8.8.8:12345", nil)
 	if err != nil {
 		t.Errorf("safeControl() = %v, want nil when no port restrictions", err)
@@ -931,7 +981,7 @@ func TestWithAllowedPorts_default_only_443(t *testing.T) {
 func TestWithAllowedSchemes_rejects_disallowed(t *testing.T) {
 	t.Parallel()
 	schemes := map[string]struct{}{"https": {}}
-	err := validateURLWithSchemes("http://example.com/f", schemes, slog.Default())
+	err := validateURLWithSchemes("http://example.com/f", schemes)
 	if err == nil {
 		t.Error("expected error for http when only https allowed")
 	}
@@ -944,7 +994,7 @@ func TestWithAllowedSchemes_rejects_disallowed(t *testing.T) {
 func TestWithAllowedSchemes_allows_http_when_configured(t *testing.T) {
 	t.Parallel()
 	schemes := map[string]struct{}{"https": {}, "http": {}}
-	err := validateURLWithSchemes("http://example.com/f", schemes, slog.Default())
+	err := validateURLWithSchemes("http://example.com/f", schemes)
 	if err != nil {
 		t.Errorf("http should be allowed, got: %v", err)
 	}
@@ -953,7 +1003,7 @@ func TestWithAllowedSchemes_allows_http_when_configured(t *testing.T) {
 func TestWithAllowedSchemes_case_insensitive(t *testing.T) {
 	t.Parallel()
 	schemes := map[string]struct{}{"https": {}}
-	err := validateURLWithSchemes("HTTPS://example.com/f", schemes, slog.Default())
+	err := validateURLWithSchemes("HTTPS://example.com/f", schemes)
 	if err != nil {
 		t.Errorf("HTTPS (uppercase) should match, got: %v", err)
 	}
@@ -1007,5 +1057,117 @@ func TestSafeTransport_control_hook_fires(t *testing.T) {
 	_, err := dial(context.Background(), "tcp", "evil.com:1")
 	if err != nil && strings.Contains(err.Error(), "not public") {
 		t.Errorf("allow-all policy should pass Control hook, got: %v", err)
+	}
+}
+
+func TestError_Unwrap_chain(t *testing.T) {
+	t.Parallel()
+	base := errors.New("dns boom")
+	err := ssrfErr(KindDNSFailed, "h", "lookup failed", base)
+	if !errors.Is(err, base) {
+		t.Errorf("errors.Is(ssrfErr(..., base), base) = false, want true")
+	}
+	if got := errors.Unwrap(err); got != base {
+		t.Errorf("errors.Unwrap(err) = %v, want %v", got, base)
+	}
+	plain := ssrfErr(KindBadScheme, "", "no underlying", nil)
+	if got := errors.Unwrap(plain); got != nil {
+		t.Errorf("errors.Unwrap(plain) = %v, want nil", got)
+	}
+}
+
+func TestIsPublicAddr_invalid_zero_value(t *testing.T) {
+	t.Parallel()
+	if IsPublicAddr(netip.Addr{}) {
+		t.Error("IsPublicAddr(netip.Addr{}) = true, want false for invalid zero address")
+	}
+}
+
+func TestSafeControl_rejects_malformed_inputs(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		ports   map[uint16]struct{}
+		network string
+		address string
+	}{
+		{"no port", nil, "tcp4", "no-port-here"},
+		{"non-ip host", nil, "tcp4", "example.com:443"},
+		{"non-ip host with port allowlist", map[uint16]struct{}{443: {}}, "tcp4", "example.com:443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := safeControl(isPublicAddr, tc.ports)
+			err := ctrl(tc.network, tc.address, nil)
+			if err == nil {
+				t.Errorf("safeControl(%q, %q) = nil, want error", tc.network, tc.address)
+			}
+			var ssrfError *Error
+			if !errors.As(err, &ssrfError) {
+				t.Errorf("safeControl(%q, %q) error is not *Error: %T", tc.network, tc.address, err)
+			}
+		})
+	}
+}
+
+func TestSafeRedirectPolicyWithSchemes_caps_and_delegates(t *testing.T) {
+	t.Parallel()
+	called := false
+	next := func(_ *http.Request, _ []*http.Request) error {
+		called = true
+		return nil
+	}
+	policy := SafeRedirectPolicyWithSchemes(nil, next)
+
+	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		"https://example.com/file", http.NoBody)
+	via := make([]*http.Request, 10)
+	if err := policy(req, via); err == nil {
+		t.Error("SafeRedirectPolicyWithSchemes() = nil, want error at 10-redirect cap")
+	}
+	if called {
+		t.Error("next called past the 10-redirect cap")
+	}
+
+	// Under the cap, a valid https public target delegates to next.
+	if err := policy(req, nil); err != nil {
+		t.Errorf("SafeRedirectPolicyWithSchemes() = %v, want nil under cap", err)
+	}
+	if !called {
+		t.Error("SafeRedirectPolicyWithSchemes() did not delegate to next under cap")
+	}
+}
+
+func TestSafeControl_unparseable_port_with_allowlist(t *testing.T) {
+	t.Parallel()
+	ports := map[uint16]struct{}{443: {}}
+	ctrl := safeControl(isPublicAddr, ports)
+
+	err := ctrl("tcp4", "8.8.8.8:notaport", nil)
+
+	if err == nil {
+		t.Fatal("safeControl(tcp4, 8.8.8.8:notaport) = nil, want error for unparseable port")
+	}
+	var ssrfError *Error
+	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindBadPort {
+		t.Errorf("safeControl(tcp4, 8.8.8.8:notaport) Kind = %v, want KindBadPort", err)
+	}
+}
+
+func TestSafeDialContext_context_cancelled_before_dial(t *testing.T) {
+	t.Parallel()
+	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, r, nil)
+
+	_, err := dial(ctx, "tcp", "example.com:443")
+
+	if err == nil {
+		t.Fatal("safeDialContext with cancelled context = nil, want context cancelled error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("safeDialContext err = %v, want wrapped context.Canceled", err)
 	}
 }

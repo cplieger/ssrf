@@ -349,7 +349,7 @@ func FuzzSafeControl(f *testing.F) {
 	f.Add("tcp6", "[64:ff9b::192.168.1.1]:443")
 
 	f.Fuzz(func(t *testing.T, network, address string) {
-		ctrl := safeControl(isPublicAddr, nil, nil)
+		ctrl := safeControl(isPublicAddr, nil)
 		err := ctrl(network, address, nil)
 
 		// Must never panic (implicit by reaching here)
@@ -421,7 +421,7 @@ func FuzzValidateURLWithSchemes(f *testing.F) {
 			return
 		}
 
-		err := validateURLWithSchemes(rawURL, schemes, nil)
+		err := validateURLWithSchemes(rawURL, schemes)
 
 		// If accepted, scheme must be in allowed list AND host must be public
 		if err == nil {

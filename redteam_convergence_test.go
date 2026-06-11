@@ -2,7 +2,6 @@ package ssrf
 
 import (
 	"context"
-	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -60,14 +59,6 @@ func TestConvergence_NilOptionElement_SafeRedirectPolicyWithSchemes(t *testing.T
 	if err2 != nil {
 		t.Errorf("HTTPS to public domain should pass, got: %v", err2)
 	}
-}
-
-func TestConvergence_WithLogger_nil_no_panic(t *testing.T) {
-	t.Parallel()
-	// WithLogger(nil) must not panic and must retain slog.Default().
-	tr := SafeTransport(WithLogger(nil), WithAllowedPorts(443))
-	// Trigger a blocked dial to exercise logging path.
-	_, _ = tr.DialContext(context.Background(), "tcp", "127.0.0.1:443")
 }
 
 // --- KIND* RENAME INTEGRITY ---
@@ -202,7 +193,6 @@ func TestConvergence_concurrent_SafeTransport_construction(t *testing.T) {
 			tr := SafeTransport(
 				WithAllowedPorts(443, 8443),
 				WithAllowedSchemes("https"),
-				WithLogger(nil),
 			)
 			if tr == nil {
 				t.Error("concurrent SafeTransport returned nil")
@@ -236,7 +226,7 @@ func TestConvergence_concurrent_dial_mixed_resolver(t *testing.T) {
 // Attempt: Control hook with non-TCP network.
 func TestConvergence_control_rejects_udp(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil, nil) // nil logger test
+	ctrl := safeControl(isPublicAddr, nil)
 	err := ctrl("udp4", "8.8.8.8:53", nil)
 	if err == nil {
 		t.Error("BYPASS: Control hook allowed UDP network")
@@ -270,7 +260,7 @@ func TestConvergence_scheme_case_bypass(t *testing.T) {
 		"FTP://example.com/f",
 	}
 	for _, u := range cases {
-		err := validateURLWithSchemes(u, schemes, nil) // nil logger test
+		err := validateURLWithSchemes(u, schemes)
 		if err == nil {
 			t.Errorf("BYPASS: scheme case %q passed", u)
 		}
@@ -290,21 +280,5 @@ func TestConvergence_FQDN_trailing_dots(t *testing.T) {
 		if err == nil {
 			t.Errorf("BYPASS: trailing dot %q passed", u)
 		}
-	}
-}
-
-// Verify safeControl with nil logger does not panic.
-func TestConvergence_safeControl_nil_logger(t *testing.T) {
-	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
-	// Exercise blocked path.
-	err := ctrl("tcp4", "10.0.0.1:443", nil)
-	if err == nil {
-		t.Error("safeControl with nil logger failed to block private IP")
-	}
-	// Exercise port-blocked path.
-	err = ctrl("tcp4", net.JoinHostPort("8.8.8.8", "80"), nil)
-	if err == nil {
-		t.Error("safeControl with nil logger failed to block port 80")
 	}
 }

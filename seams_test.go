@@ -3,6 +3,7 @@ package ssrf
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -13,8 +14,8 @@ import (
 
 // mockResolver implements Resolver for testing WithResolver.
 type mockResolver struct {
-	ips []netip.Addr
 	err error
+	ips []netip.Addr
 }
 
 func (m *mockResolver) LookupNetIP(_ context.Context, _, _ string) ([]netip.Addr, error) {
@@ -178,24 +179,102 @@ func TestWithResolver_nil_uses_default(t *testing.T) {
 	}
 }
 
-func TestWithLogger_custom_logger_receives_warnings(t *testing.T) {
+func TestWithAllowedSchemes_empty_retains_default(t *testing.T) {
 	t.Parallel()
-	var buf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
-	tr := SafeTransport(WithLogger(log), WithResolver(r))
-	dial := tr.DialContext
-	_, _ = dial(context.Background(), "tcp", "evil.com:443")
-	if !strings.Contains(buf.String(), "ssrf dial blocked") {
-		t.Errorf("expected logger to receive 'ssrf dial blocked', got: %q", buf.String())
+	s := AllowedSchemes(WithAllowedSchemes())
+	if _, ok := s["https"]; !ok {
+		t.Errorf("AllowedSchemes(WithAllowedSchemes()) = %v, want https retained", s)
+	}
+	if len(s) != 1 {
+		t.Errorf("empty WithAllowedSchemes widened the set to %v, want {https}", s)
 	}
 }
 
-func TestWithLogger_nil_uses_default(t *testing.T) {
+func TestSafeDialContext_empty_resolution_blocked(t *testing.T) {
 	t.Parallel()
-	// Passing nil should not panic and should use slog.Default().
-	tr := SafeTransport(WithLogger(nil))
-	if tr.DialContext == nil {
-		t.Fatal("SafeTransport(WithLogger(nil)).DialContext is nil")
+	r := &mockResolver{ips: nil}
+	tr := SafeTransport(WithResolver(r))
+	_, err := tr.DialContext(context.Background(), "tcp", "evil.com:443")
+	if err == nil {
+		t.Fatal("DialContext() = nil, want error when resolver returns no IPs")
+	}
+	var ssrfError *Error
+	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindDNSFailed {
+		t.Errorf("DialContext() error = %v, want KindDNSFailed", err)
+	}
+	if !strings.Contains(err.Error(), "no IPs resolved") {
+		t.Errorf("DialContext() error = %q, want no IPs resolved message", err.Error())
+	}
+}
+
+// IsPublicHost is a predicate, not an enforcement gate: probing a non-public
+// host must NOT emit a "ssrf blocked" Warn (no request was blocked). These
+// tests mutate slog.Default(), so they are NOT parallel — the testing
+// framework runs non-parallel tests to completion before parallel ones start,
+// so the global default is never swapped under a concurrent test.
+func TestIsPublicHost_predicate_is_silent(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	cases := []string{"10.0.0.1", "127.0.0.1", "localhost", "internal", "192.168.1.1"}
+	for _, host := range cases {
+		if IsPublicHost(host) {
+			t.Errorf("IsPublicHost(%q) = true, want false", host)
+		}
+	}
+	if got := buf.String(); strings.Contains(got, "ssrf blocked") {
+		t.Errorf("IsPublicHost emitted a block log for predicate queries: %q", got)
+	}
+}
+
+// The ValidateURL enforcement path MUST still log a "ssrf blocked" Warn when it
+// rejects a host — the predicate-silence change must not mute real blocks.
+func TestValidateURL_enforcement_still_logs(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	if err := ValidateURL("https://10.0.0.1/x"); err == nil {
+		t.Fatal("ValidateURL(private IP) = nil, want error")
+	}
+	if got := buf.String(); !strings.Contains(got, "ssrf blocked") {
+		t.Errorf("ValidateURL enforcement path did not emit a block log; got %q", got)
+	}
+}
+
+// validateHost is the enforcement wrapper: each rejection Kind maps to a
+// distinct "reason" attribute on the "ssrf blocked" Warn, which block
+// dashboards group on. This pins the Kind->reason mapping so a swapped
+// switch arm (a mutant) is caught. Not parallel: it mutates slog.Default().
+func TestValidateHost_emits_reason_per_kind(t *testing.T) {
+	cases := []struct {
+		name       string
+		host       string
+		wantReason string
+	}{
+		{"empty host from trailing dots", ".", "empty_host"},
+		{"localhost", "localhost", "localhost"},
+		{"non public ip", "10.0.0.1", "non_public_ip"},
+		{"bare hostname", "internal", "bare_hostname"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(prev)
+
+			if err := validateHost(tc.host); err == nil {
+				t.Fatalf("validateHost(%q) = nil, want error", tc.host)
+			}
+
+			got := buf.String()
+			if !strings.Contains(got, "reason="+tc.wantReason) {
+				t.Errorf("validateHost(%q) block log = %q, want reason=%q", tc.host, got, tc.wantReason)
+			}
+		})
 	}
 }

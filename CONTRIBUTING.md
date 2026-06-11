@@ -22,6 +22,9 @@ hardened `*http.Transport`. The public surface lives in a single file,
 
 Errors are `*ssrf.Error` with a machine-readable `Kind` (`KindBadScheme`,
 `KindNonPublicIP`, `KindBadPort`, …); consumers branch on it via `errors.As`.
+Redirect-policy rejections propagate the inner `Kind` (a bad-scheme redirect
+surfaces as `KindBadScheme`, not a blanket `KindNonPublicIP`); the hop-cap
+returns `KindTooManyRedirects`.
 
 ## Security invariants (do not weaken)
 
@@ -32,7 +35,25 @@ These are the parts a change can silently break. Treat them as contracts.
   also installs a `net.Dialer.Control` hook (`safeControl`) that re-validates
   the actually-connected IP at socket creation, after the OS resolves but
   before the TCP handshake. Never collapse these two layers into one; the
-  pairing is what defeats TOCTOU rebinding.
+  pairing is what defeats TOCTOU rebinding. Two implementation details keep it
+  intact and are easy to break: (1) `safeDialContext` sets
+  `dialer.ControlContext = nil` before assigning `dialer.Control`, because a
+  non-nil `ControlContext` takes precedence in `net.Dialer` and a
+  caller-supplied one (via `WithDialer`) would otherwise silently shadow
+  `safeControl`; (2) the `maxDialIPs` (8) dial-attempt cap is applied only after
+  every resolved IP has been validated, so it bounds dial time against a
+  resolver returning many valid-but-blackholed IPs without ever skipping a
+  check (fail-closed).
+- **`IsPublicHost` is a silent predicate; only enforcement logs.**
+  `IsPublicHost` and `validateHost` share one classification core
+  (`hostValidationError`), but only the enforcement wrapper (`validateHost`,
+  used by `ValidateURL` and the dial/redirect paths) emits a `slog.Warn`. Keep
+  `IsPublicHost` log-free so callers can probe host publicness without
+  polluting block dashboards. All logging goes through `slog.Default()` (there
+  is no per-instance logger option), and every block log carries a bounded
+  snake_case `reason` from `reasonLabel(ErrorKind)`; never put a host or IP in
+  the `reason` attribute (use the `error` key for detail) or block-dashboard
+  cardinality blows up.
 - **`isPublicAddr` unmaps first.** IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
   unmapped before any prefix check, so IPv4 block ranges still apply.
 - **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
