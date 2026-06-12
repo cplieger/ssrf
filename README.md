@@ -11,12 +11,12 @@ Go library that validates URLs and IP addresses against SSRF attacks. Rejects pr
 
 ## Install
 
-`go get github.com/cplieger/ssrf@latest`
+`go get github.com/cplieger/ssrf/v2@latest`
 
 ## Usage
 
 ```go
-import "github.com/cplieger/ssrf"
+import "github.com/cplieger/ssrf/v2"
 
 // Validate a URL before fetching
 if err := ssrf.ValidateURL("https://example.com/data.json"); err != nil {
