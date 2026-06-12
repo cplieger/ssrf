@@ -72,7 +72,7 @@ These are the parts a change can silently break. Treat them as contracts.
 
 ## Local development
 
-Requires the Go toolchain pinned in `go.mod` (currently `go 1.26.4`).
+Requires the Go toolchain pinned in `go.mod`.
 
 ```sh
 go build ./...
