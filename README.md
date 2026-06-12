@@ -4,7 +4,6 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf.svg)](https://pkg.go.dev/github.com/cplieger/ssrf)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/ssrf)](https://goreportcard.com/report/github.com/cplieger/ssrf)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/ssrf/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/ssrf)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 > URL validation to prevent server-side request forgery (SSRF)
 
