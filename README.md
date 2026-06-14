@@ -1,11 +1,12 @@
 # ssrf
 
-[![CI](https://github.com/cplieger/ssrf/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/ssrf/actions/workflows/ci.yaml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf.svg)](https://pkg.go.dev/github.com/cplieger/ssrf)
+[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/ssrf)](https://goreportcard.com/report/github.com/cplieger/ssrf)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/ssrf/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/ssrf)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
+[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
+[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13220/badge)](https://www.bestpractices.dev/projects/13220)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/ssrf/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/ssrf)
 
 > URL validation to prevent server-side request forgery (SSRF)
 
