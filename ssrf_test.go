@@ -521,6 +521,15 @@ func TestSafeTransport_returns_non_nil(t *testing.T) {
 	if tr.IdleConnTimeout == 0 {
 		t.Error("SafeTransport().IdleConnTimeout == 0, want a bound on idle conn lifetime")
 	}
+	// Exact-value pins: a shrunk multiplier (10*time.Second -> 10/time.Second
+	// = 0) would silently disable these caps. 0 means "no timeout", which
+	// re-opens a slow-TLS-handshake / slow-100-continue stall vector.
+	if tr.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("SafeTransport().TLSHandshakeTimeout = %v, want 10s cap on the TLS handshake", tr.TLSHandshakeTimeout)
+	}
+	if tr.ExpectContinueTimeout != time.Second {
+		t.Errorf("SafeTransport().ExpectContinueTimeout = %v, want 1s before sending the request body", tr.ExpectContinueTimeout)
+	}
 }
 
 // --- Property tests ---
