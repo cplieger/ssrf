@@ -18,8 +18,8 @@ import (
 // size of the DNS-lookup timeout budget that safeDialContext grants, without
 // depending on wall-clock sleeps.
 type budgetResolver struct {
-	minBudget time.Duration
 	ips       []netip.Addr
+	minBudget time.Duration
 }
 
 func (b budgetResolver) LookupNetIP(ctx context.Context, _, _ string) ([]netip.Addr, error) {
