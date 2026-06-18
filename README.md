@@ -1,6 +1,6 @@
 # ssrf
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf.svg)](https://pkg.go.dev/github.com/cplieger/ssrf)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v2.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v2)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/ssrf)](https://goreportcard.com/report/github.com/cplieger/ssrf)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
