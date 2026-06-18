@@ -19,13 +19,13 @@ when a consumer routes user-influenced URLs through it.
 
 ## Threats and mitigations
 
-| Threat | Mitigation | Evidence |
-|---|---|---|
-| Direct request to private / loopback / link-local / CGNAT ranges | explicit bl- list of all such ranges (IPv4 + IPv6) | range tests |
-| IPv6 transition bypasses (6to4, NAT64, Teredo, IPv4-mapped) | those embeddings are decoded and blocked | dedicated bypass tests |
-| DNS rebinding (validate one IP, connect to another) | resolve-once + `Dialer.Control` re-validates the _actually-connected_ IP at dial time | transport tests |
-| Redirect-based bypass (validated URL 302s to an internal one) | redirect allowlist / re-validation on redirect | redirect tests |
-| Malformed/edge-case URLs slipping past the parser | hardened parsing under fuzz | `*_fuzz_test.go` |
+| Threat                                                           | Mitigation                                                                            | Evidence               |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------- |
+| Direct request to private / loopback / link-local / CGNAT ranges | explicit bl- list of all such ranges (IPv4 + IPv6)                                    | range tests            |
+| IPv6 transition bypasses (6to4, NAT64, Teredo, IPv4-mapped)      | those embeddings are decoded and blocked                                              | dedicated bypass tests |
+| DNS rebinding (validate one IP, connect to another)              | resolve-once + `Dialer.Control` re-validates the _actually-connected_ IP at dial time | transport tests        |
+| Redirect-based bypass (validated URL 302s to an internal one)    | redirect allowlist / re-validation on redirect                                        | redirect tests         |
+| Malformed/edge-case URLs slipping past the parser                | hardened parsing under fuzz                                                           | `*_fuzz_test.go`       |
 
 ## Design note
 

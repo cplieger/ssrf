@@ -92,17 +92,17 @@ if ssrf.IsPublicAddr(addr) {
 
 All errors returned by `ValidateURL`, `SafeTransport`'s dial function, and the redirect policies are `*ssrf.Error` with a `Kind` field:
 
-| Kind | Meaning |
-|------|---------|
-| `KindInvalidURL` | URL could not be parsed |
-| `KindBadScheme` | Scheme is not in the allowed set |
-| `KindEmptyHost` | No host component |
-| `KindLocalhost` | Points to localhost |
-| `KindBareHostname` | Hostname without dots |
-| `KindNonPublicIP` | IP is not globally routable |
-| `KindDNSFailed` | DNS resolution failed |
-| `KindPolicyDenied` | Custom policy rejected the IP |
-| `KindBadPort` | Port is not in the allowed set |
+| Kind                   | Meaning                               |
+| ---------------------- | ------------------------------------- |
+| `KindInvalidURL`       | URL could not be parsed               |
+| `KindBadScheme`        | Scheme is not in the allowed set      |
+| `KindEmptyHost`        | No host component                     |
+| `KindLocalhost`        | Points to localhost                   |
+| `KindBareHostname`     | Hostname without dots                 |
+| `KindNonPublicIP`      | IP is not globally routable           |
+| `KindDNSFailed`        | DNS resolution failed                 |
+| `KindPolicyDenied`     | Custom policy rejected the IP         |
+| `KindBadPort`          | Port is not in the allowed set        |
 | `KindTooManyRedirects` | Redirect chain exceeded the hop limit |
 
 When a redirect is blocked because the target URL failed validation, the policy
@@ -155,15 +155,15 @@ IPv6 transition mechanisms (embedded IPv4 extracted and re-validated):
 
 The following features are intentionally NOT implemented:
 
-| Feature | Rationale |
-|---------|-----------|
-| Custom allow/deny IP lists | `WithPolicy(func(netip.Addr) bool)` already provides this |
-| Hostname allowlist/denylist | Application-layer policy, not core SSRF defense |
-| Happy Eyeballs (RFC 8305) | Security library prioritizes correctness over speed |
-| Response body size limit | Use `io.LimitReader` at the application layer |
-| Blanket `2001::/23` block | Overly broad; some sub-allocations are globally reachable. We block specific non-routable sub-ranges instead |
-| ISATAP embedded IPv4 | Uses `fe80::/64` (already blocked) or routable prefixes where embedded IPv4 is informational only |
-| DNS-over-HTTPS/TLS resolver | `WithResolver` enables plugging in any resolver implementation |
+| Feature                     | Rationale                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Custom allow/deny IP lists  | `WithPolicy(func(netip.Addr) bool)` already provides this                                                    |
+| Hostname allowlist/denylist | Application-layer policy, not core SSRF defense                                                              |
+| Happy Eyeballs (RFC 8305)   | Security library prioritizes correctness over speed                                                          |
+| Response body size limit    | Use `io.LimitReader` at the application layer                                                                |
+| Blanket `2001::/23` block   | Overly broad; some sub-allocations are globally reachable. We block specific non-routable sub-ranges instead |
+| ISATAP embedded IPv4        | Uses `fe80::/64` (already blocked) or routable prefixes where embedded IPv4 is informational only            |
+| DNS-over-HTTPS/TLS resolver | `WithResolver` enables plugging in any resolver implementation                                               |
 
 ## Security
 
