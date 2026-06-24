@@ -116,11 +116,12 @@ type Resolver interface {
 type Option func(*transportConfig)
 
 type transportConfig struct {
-	policy       Policy
-	dialer       *net.Dialer
-	resolver     Resolver
-	allowedPorts map[uint16]struct{}
-	schemes      map[string]struct{}
+	policy         Policy
+	dialer         *net.Dialer
+	resolver       Resolver
+	allowedPorts   map[uint16]struct{}
+	schemes        map[string]struct{}
+	policyIsCustom bool
 }
 
 // WithPolicy sets a custom allow/deny policy for resolved IP addresses.
@@ -130,6 +131,7 @@ func WithPolicy(p Policy) Option {
 	return func(c *transportConfig) {
 		if p != nil {
 			c.policy = p
+			c.policyIsCustom = true
 		}
 	}
 }
@@ -164,6 +166,13 @@ func WithResolver(r Resolver) Option {
 // WithAllowedPorts sets the ports that outbound connections may target.
 // By default only port 443 is allowed (matching HTTPS-only posture).
 // Pass an empty slice to allow all ports. Mirrors doyensec/safeurl AllowedPorts.
+//
+// FAIL-OPEN asymmetry: an empty call here WIDENS to all ports -- the opposite
+// of [WithAllowedSchemes] (empty = no-op, HTTPS-only retained) and of a non-nil
+// empty [SafeRedirectPolicyWithSchemes] map (fail-closed, blocks every scheme).
+// Guard against an accidentally-empty config slice at the call site:
+// WithAllowedPorts(cfgPorts...) silently disables port restriction when
+// cfgPorts is empty, rather than retaining the 443-only default.
 func WithAllowedPorts(ports ...uint16) Option {
 	return func(c *transportConfig) {
 		if len(ports) == 0 {
@@ -266,6 +275,20 @@ func IsPublicAddr(addr netip.Addr) bool {
 // "ssrf blocked" Warn on rejection; the [IsPublicHost] predicate uses this core
 // directly and stays silent (a query is not a block).
 func hostValidationError(host string) *Error {
+	// URL-authority bracket syntax wraps IPv6 literals ("[::1]",
+	// "[2606:4700:4700::1111]", "[::ffff:192.168.1.1]"). netip.ParseAddr rejects
+	// the brackets, so a bracketed IPv4-mapped/embedded-IPv4 internal literal
+	// whose dotted tail satisfies the contains-a-dot hostname gate below would
+	// otherwise be misclassified PUBLIC by IsPublicHost. Strip a single matching
+	// bracket pair and classify the inner literal, mirroring url.Hostname()
+	// (which ValidateURL already applies before reaching here): a genuinely
+	// public IPv6 literal stays public, an internal one is correctly rejected.
+	// ValidateURL never reaches here with brackets; this guards direct
+	// IsPublicHost callers passing raw URL-authority syntax.
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+
 	// Strip all trailing dots (FQDN notation).
 	host = strings.TrimRight(host, ".")
 	if host == "" {
@@ -285,6 +308,17 @@ func hostValidationError(host string) *Error {
 		return nil
 	}
 
+	// Reject non-canonical IPv4 encodings (dotted-octal "0177.0.0.1",
+	// dotted-hex "0x7f.0.0.1", short-form "127.1", oversized inet_aton
+	// "192.168.257"). netip.ParseAddr is strict and rejects all of these, so
+	// without this gate they fall through to the dotted-hostname arm below and
+	// ValidateURL returns nil — yet a libc resolver (glibc getaddrinfo) resolves
+	// them to internal addresses. A real DNS name never has an all-numeric label
+	// set, so that is a reliable signature for these alternate encodings.
+	if looksLikeNumericIPv4(host) {
+		return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL host is a non-canonical IP encoding: %s", host), nil)
+	}
+
 	// Not an IP; must be a hostname with at least one dot.
 	if !strings.Contains(host, ".") {
 		return ssrfErr(KindBareHostname, host, fmt.Sprintf("URL points to bare hostname: %s", host), nil)
@@ -292,11 +326,66 @@ func hostValidationError(host string) *Error {
 	return nil
 }
 
+// looksLikeNumericIPv4 reports whether every dot-separated label of host is a
+// decimal/octal/hex integer — the signature of a non-canonical IPv4 encoding
+// (dotted-octal, dotted-hex, or oversized inet_aton form) that netip.ParseAddr
+// rejects but a libc resolver would accept. Dotless forms (fewer than two
+// labels) are left to the bare-hostname gate.
+func looksLikeNumericIPv4(host string) bool {
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return false // dotless forms handled by the bare-hostname gate
+	}
+	for _, l := range labels {
+		if !isNumericLabel(l) {
+			return false
+		}
+	}
+	return true
+}
+
+// isNumericLabel reports whether l is a non-empty string of decimal digits
+// or a 0x-prefixed hex literal. It intentionally OVER-matches relative to
+// inet_aton (it also accepts forms inet_aton rejects, e.g. invalid-octal
+// "08" or out-of-range "257"): looksLikeNumericIPv4 uses it only to DETECT
+// and reject a non-canonical IPv4 encoding, never to parse one, so a
+// fail-closed superset is safe. Do NOT tighten it toward strict inet_aton
+// semantics -- a narrowed form would fall through to the dotted-hostname
+// arm and reach the resolver.
+func isNumericLabel(l string) bool {
+	if l == "" {
+		return false
+	}
+	if len(l) > 2 && l[0] == '0' && (l[1] == 'x' || l[1] == 'X') {
+		for _, c := range l[2:] {
+			isHexDigit := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHexDigit {
+				return false
+			}
+		}
+		return true
+	}
+	for _, c := range l {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // reasonLabel maps an ErrorKind to the bounded, low-cardinality "reason"
-// label used on every block log line so Loki/Grafana can aggregate block
-// events by reason. Keep this switch in sync with the Kinds the package
-// emits: any new Kind added to ErrorKind must get a case here, otherwise
-// it silently degrades to "blocked". Never embed hosts/IPs in this label.
+// label emitted by the host-validation path ([validateHost], via [ValidateURL]),
+// the redirect policy, and the policy-denial branch of the socket-level paths
+// ([safeControl], [safeDialContext]) -- which pass KindNonPublicIP by default or
+// KindPolicyDenied under a custom [WithPolicy]. The socket-level paths' structural
+// rejections and port checks (checkAllowedPort) intentionally emit their own
+// finer-grained inline labels (e.g. "no_ips_resolved", "disallowed_network",
+// "unparseable_ip", "invalid_address", "dns_failed", "port_not_allowed") that do
+// NOT flow through this helper. Every reason value is a bounded snake_case constant
+// so Loki/Grafana can aggregate blocks by reason. Keep this switch in sync with the
+// Kinds routed through it: a new Kind emitted by any of those paths needs a case
+// here, else it silently degrades to "blocked". Never embed hosts/IPs in any reason
+// label.
 func reasonLabel(kind ErrorKind) string {
 	switch kind {
 	case KindInvalidURL:
@@ -434,6 +523,7 @@ func isNonRoutableRange(addr netip.Addr) bool {
 // mechanism wrappers (6to4, NAT64, Teredo, IPv4-compatible).
 func embeddedIPv4IsPublic(addr netip.Addr) bool {
 	if sixToFour.Contains(addr) {
+		// RFC 3056: 2002:V4ADDR::/48 -- 32-bit IPv4 is bytes 2-5 (after 0x2002).
 		b := addr.As16()
 		embedded := netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})
 		if !isPublicAddr(embedded) {
@@ -441,6 +531,7 @@ func embeddedIPv4IsPublic(addr netip.Addr) bool {
 		}
 	}
 	if nat64Wellknown.Contains(addr) {
+		// RFC 6052 sec 2.2: for the /96 well-known prefix IPv4 is the last 32 bits, bytes 12-15.
 		b := addr.As16()
 		embedded := netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
 		if !isPublicAddr(embedded) {
@@ -448,6 +539,10 @@ func embeddedIPv4IsPublic(addr netip.Addr) bool {
 		}
 	}
 	if teredoPrefix.Contains(addr) {
+		// RFC 4380 sec 4: bytes 4-7 = Teredo server IPv4; bytes 12-15 = client IPv4
+		// stored bitwise-inverted (XOR 0xffffffff / ^0xFF per byte) so it is obscured
+		// in the packet header. The inversion is load-bearing: without it an attacker
+		// could encode an internal client IP as its bitwise inverse and pass the check.
 		b := addr.As16()
 		clientIP := netip.AddrFrom4([4]byte{b[12] ^ 0xFF, b[13] ^ 0xFF, b[14] ^ 0xFF, b[15] ^ 0xFF})
 		if !isPublicAddr(clientIP) {
@@ -459,6 +554,8 @@ func embeddedIPv4IsPublic(addr netip.Addr) bool {
 		}
 	}
 	if ipv4Compat.Contains(addr) && !addr.IsUnspecified() {
+		// RFC 4291 sec 2.5.5.1: deprecated IPv4-compatible ::a.b.c.d -- IPv4 is bytes 12-15.
+		// IsUnspecified guard excludes :: (all-zeros).
 		b := addr.As16()
 		embedded := netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
 		if !isPublicAddr(embedded) {
@@ -539,7 +636,17 @@ func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage str
 // canonical defense-in-depth against DNS rebinding/TOCTOU, mirroring
 // doyensec/safeurl and Stripe smokescreen's approach. The Control hook
 // fires after DNS resolution but before the TCP handshake completes.
-func safeControl(policy Policy, allowedPorts map[uint16]struct{}) func(network, address string, c syscall.RawConn) error {
+//
+// denyKind is an optional override for the ErrorKind emitted when policy
+// rejects the connected IP; it defaults to KindNonPublicIP. SafeTransport
+// passes KindPolicyDenied when a custom WithPolicy is in effect, so a
+// custom-policy denial surfaces the documented KindPolicyDenied. Structural
+// rejections (disallowed network, unparseable IP) always use KindNonPublicIP.
+func safeControl(policy Policy, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(network, address string, c syscall.RawConn) error {
+	policyDenyKind := KindNonPublicIP
+	if len(denyKind) > 0 {
+		policyDenyKind = denyKind[0]
+	}
 	return func(network, address string, _ syscall.RawConn) error {
 		if network != "tcp4" && network != "tcp6" {
 			slog.Default().Warn("ssrf control blocked", "network", network, "reason", "disallowed_network")
@@ -566,8 +673,8 @@ func safeControl(policy Policy, allowedPorts map[uint16]struct{}) func(network, 
 		addr = addr.Unmap()
 		if !policy(addr) {
 			slog.Default().Warn("ssrf control blocked",
-				"ip", addr.String(), "reason", "non_public_ip")
-			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF control: IP %s is not public", addr), nil)
+				"ip", addr.String(), "reason", reasonLabel(policyDenyKind))
+			return ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF control: IP %s is not public", addr), nil)
 		}
 		return nil
 	}
@@ -576,12 +683,25 @@ func safeControl(policy Policy, allowedPorts map[uint16]struct{}) func(network, 
 // safeDialContext returns a DialContext function that resolves DNS and
 // validates all resolved IPs against the given policy before connecting.
 // The dialer also has a Control hook for defense-in-depth validation.
-func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allowedPorts map[uint16]struct{}) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	// Install the socket-time hook for defense-in-depth. Clear ControlContext
-	// first: when set it takes precedence over Control (net.Dialer semantics),
-	// which would silently bypass this layer if a caller supplied it via WithDialer.
-	dialer.ControlContext = nil
-	dialer.Control = safeControl(policy, allowedPorts)
+//
+// denyKind is an optional override for the ErrorKind emitted when policy
+// rejects a resolved IP; it defaults to KindNonPublicIP and is forwarded to
+// safeControl so both validation layers report the same kind. SafeTransport
+// passes KindPolicyDenied when a custom WithPolicy is in effect.
+func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	policyDenyKind := KindNonPublicIP
+	if len(denyKind) > 0 {
+		policyDenyKind = denyKind[0]
+	}
+	// Clone the caller-supplied dialer so installing the SSRF Control hook never
+	// mutates a *net.Dialer the caller passed via WithDialer (and may share across
+	// transports with differing policy/port configs). Clear ControlContext on the
+	// copy: when set it takes precedence over Control (net.Dialer semantics), which
+	// would silently bypass this layer if a caller supplied it via WithDialer.
+	d := *dialer
+	d.ControlContext = nil
+	d.Control = safeControl(policy, allowedPorts, policyDenyKind)
+	dialer = &d
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -613,12 +733,18 @@ func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allow
 			safe[i] = ips[i].Unmap()
 			if !policy(safe[i]) {
 				slog.Default().Warn("ssrf dial blocked",
-					"host", host, "resolved_ip", safe[i].String(), "reason", "non_public_ip")
-				return nil, ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
+					"host", host, "resolved_ip", safe[i].String(), "reason", reasonLabel(policyDenyKind))
+				return nil, ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
 			}
 		}
 
 		var lastErr error
+		// maxDialIPs is applied ONLY here, after the loop above validated every
+		// resolved IP and returned on the first non-public one (fail-closed). Do
+		// NOT hoist this truncation above that loop to skip validating IPs we
+		// won't dial: a resolver returning a few public IPs followed by internal
+		// ones would then succeed. The cap bounds dial *attempts* among the
+		// already-validated set; it must never gate which IPs get validated.
 		dialList := safe
 		if len(dialList) > maxDialIPs {
 			slog.Default().Warn("ssrf dial capped",
@@ -662,8 +788,15 @@ func SafeTransport(opts ...Option) *http.Transport {
 			o(&cfg)
 		}
 	}
+	// A custom WithPolicy denial reports KindPolicyDenied (the documented
+	// "custom policy rejected the IP" kind); the default isPublicAddr policy
+	// keeps reporting KindNonPublicIP.
+	denyKind := KindNonPublicIP
+	if cfg.policyIsCustom {
+		denyKind = KindPolicyDenied
+	}
 	return &http.Transport{
-		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts),
+		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts, denyKind),
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,

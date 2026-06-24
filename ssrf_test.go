@@ -151,6 +151,15 @@ func TestIsPublicHost(t *testing.T) {
 		{"IPv4-mapped private", "::ffff:10.0.0.1", false},
 		{"CGNAT", "100.64.0.1", false},
 
+		// Bracketed URL-authority IPv6 syntax (l-f1): IsPublicHost mirrors
+		// url.Hostname() bracket-stripping, so a bracketed IPv4-mapped/embedded
+		// internal literal is rejected while a genuinely public bracketed IPv6
+		// literal still passes — staying consistent with ValidateURL.
+		{"bracketed IPv4-mapped private rejected", "[::ffff:192.168.1.1]", false},
+		{"bracketed IPv4-mapped loopback rejected", "[::ffff:127.0.0.1]", false},
+		{"bracketed embedded-IPv4 documentation rejected", "[2001:db8::1.2.3.4]", false},
+		{"bracketed public IPv6 accepted", "[2606:4700:4700::1111]", true},
+
 		// RFC 6890 this-host block beyond IsUnspecified.
 		{"this-host 0.1.2.3", "0.1.2.3", false},
 		{"this-host 0.127.0.0.1", "0.127.0.1", false},
@@ -751,6 +760,73 @@ func TestValidateURL_IPv6_NonRoutable(t *testing.T) {
 	}
 }
 
+// Regression (h-f1): ValidateURL must reject non-canonical IPv4 encodings.
+// netip.ParseAddr is strict and rejects dotted-octal/hex/short/oversized
+// inet_aton forms, so before the looksLikeNumericIPv4 gate they slipped past
+// the "has a dot => hostname" arm and ValidateURL returned nil — yet glibc
+// getaddrinfo resolves e.g. 0177.0.0.1 / 0x7f.0.0.1 / 127.1 to 127.0.0.1,
+// reaching internal addresses for a consumer using ValidateURL standalone.
+func TestValidateURL_rejects_noncanonical_ipv4(t *testing.T) {
+	t.Parallel()
+	rejected := []string{
+		"https://0177.0.0.1/x",    // dotted-octal loopback
+		"https://0x7f.0.0.1/x",    // dotted-hex loopback
+		"https://127.1/x",         // short-form loopback
+		"https://169.254.16962/x", // oversized inet_aton link-local
+		"https://192.168.257/x",   // oversized inet_aton private
+	}
+	for _, u := range rejected {
+		t.Run(u, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateURL(u); err == nil {
+				t.Errorf("ValidateURL(%q) = nil, want rejection of non-canonical IPv4 encoding", u)
+			}
+		})
+	}
+
+	// Legitimate hosts must still pass: a real DNS name never has an all-numeric
+	// label set. 8.8.8.8.in-addr.arpa is the reverse-DNS form (non-numeric
+	// trailing labels), 1and1.com has an alphanumeric first label.
+	allowed := []string{
+		"https://example.com/x",
+		"https://1and1.com/x",
+		"https://8.8.8.8.in-addr.arpa/x",
+	}
+	for _, u := range allowed {
+		t.Run(u, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateURL(u); err != nil {
+				t.Errorf("ValidateURL(%q) = %v, want nil (legitimate host)", u, err)
+			}
+		})
+	}
+}
+
+func TestIsNumericLabel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		label string
+		want  bool
+	}{
+		{"empty label", "", false},
+		{"decimal", "127", true},
+		{"lowercase hex", "0x7f", true},
+		{"uppercase X prefix and digits", "0XAB", true},
+		{"invalid hex digit", "0xZZ", false},
+		{"0x prefix only", "0x", false},
+		{"decimal with letter", "1a", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isNumericLabel(tc.label); got != tc.want {
+				t.Errorf("isNumericLabel(%q) = %v, want %v", tc.label, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- Structured error types ---
 
 func TestError_Kind(t *testing.T) {
@@ -781,6 +857,41 @@ func TestError_Kind(t *testing.T) {
 				t.Errorf("ValidateURL(%q) error Kind = %d, want %d", tc.url, ssrfError.Kind, tc.kind)
 			}
 		})
+	}
+}
+
+// Regression (l-f4): a custom WithPolicy denial must surface KindPolicyDenied
+// (the documented "custom policy rejected the IP" kind). Before the denyKind
+// wiring both denial sites hardcoded KindNonPublicIP, so KindPolicyDenied was
+// defined, documented, and mapped in reasonLabel but never emitted.
+func TestSafeTransport_custom_policy_denial_kind(t *testing.T) {
+	t.Parallel()
+	denyAll := func(_ netip.Addr) bool { return false }
+	tr := SafeTransport(WithPolicy(denyAll))
+	// 1.1.1.1 resolves to itself (literal IP, no DNS); the resolve-loop policy
+	// check denies it before any socket is opened, so this is hermetic.
+	_, err := tr.DialContext(context.Background(), "tcp", "1.1.1.1:443")
+	var ssrfError *Error
+	if !errors.As(err, &ssrfError) {
+		t.Fatalf("DialContext() error = %v, want *ssrf.Error", err)
+	}
+	if ssrfError.Kind != KindPolicyDenied {
+		t.Errorf("custom-policy denial Kind = %d, want KindPolicyDenied (%d)", ssrfError.Kind, KindPolicyDenied)
+	}
+}
+
+// The default policy (no WithPolicy) must keep emitting KindNonPublicIP, not
+// KindPolicyDenied — the denyKind wiring must not alter default behavior.
+func TestSafeTransport_default_policy_denial_kind(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport()
+	_, err := tr.DialContext(context.Background(), "tcp", "10.0.0.1:443")
+	var ssrfError *Error
+	if !errors.As(err, &ssrfError) {
+		t.Fatalf("DialContext() error = %v, want *ssrf.Error", err)
+	}
+	if ssrfError.Kind != KindNonPublicIP {
+		t.Errorf("default-policy denial Kind = %d, want KindNonPublicIP (%d)", ssrfError.Kind, KindNonPublicIP)
 	}
 }
 
@@ -1178,5 +1289,50 @@ func TestSafeDialContext_context_cancelled_before_dial(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("safeDialContext err = %v, want wrapped context.Canceled", err)
+	}
+}
+
+func TestReasonLabel(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		want string
+		kind ErrorKind
+	}{
+		{"invalid url", "invalid_url", KindInvalidURL},
+		{"bad scheme", "scheme", KindBadScheme},
+		{"empty host", "empty_host", KindEmptyHost},
+		{"localhost", "localhost", KindLocalhost},
+		{"bare hostname", "bare_hostname", KindBareHostname},
+		{"non public ip", "non_public_ip", KindNonPublicIP},
+		{"dns failed", "dns_failed", KindDNSFailed},
+		{"policy denied", "policy_denied", KindPolicyDenied},
+		{"bad port", "bad_port", KindBadPort},
+		{"too many redirects", "too_many_redirects", KindTooManyRedirects},
+		{"unknown zero value", "blocked", ErrorKind(0)},
+		{"unknown high value", "blocked", ErrorKind(999)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := reasonLabel(tc.kind); got != tc.want {
+				t.Errorf("reasonLabel(%d) = %q, want %q", tc.kind, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReasonLabel_exhaustive(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]ErrorKind)
+	for k := KindInvalidURL; k <= KindTooManyRedirects; k++ {
+		label := reasonLabel(k)
+		if label == "blocked" {
+			t.Errorf("reasonLabel(%d) hit the default %q; add a dedicated case", k, label)
+		}
+		if prev, dup := seen[label]; dup {
+			t.Errorf("label %q reused by kinds %d and %d", label, prev, k)
+		}
+		seen[label] = k
 	}
 }
