@@ -31,10 +31,20 @@ func FuzzValidateURL(f *testing.F) {
 
 		if err == nil {
 			if u, parseErr := url.Parse(raw); parseErr == nil {
-				host := u.Hostname()
+				host := strings.TrimRight(u.Hostname(), ".")
 				if addr, addrErr := netip.ParseAddr(host); addrErr == nil {
-					if !IsPublicAddr(addr) {
-						t.Fatalf("ValidateURL accepted non-public IP literal: %s", raw)
+					// Independent oracle: assert against re-derived blocked ranges and
+					// stdlib classifiers, NOT against IsPublicAddr (same code path).
+					canonical := addr.Unmap()
+					if canonical.IsLoopback() || canonical.IsPrivate() ||
+						canonical.IsLinkLocalUnicast() || canonical.IsMulticast() ||
+						canonical.IsUnspecified() {
+						t.Fatalf("ValidateURL accepted stdlib-classified non-public IP %s: %s", addr, raw)
+					}
+					for _, br := range independentBlockedRanges {
+						if br.prefix.Contains(canonical) {
+							t.Fatalf("ValidateURL accepted IP %s in blocked range %s (%s): %s", addr, br.prefix, br.name, raw)
+						}
 					}
 				}
 			}
@@ -433,10 +443,20 @@ func FuzzValidateURLWithSchemes(f *testing.F) {
 			if _, ok := schemes[scheme]; !ok {
 				t.Fatalf("validateURLWithSchemes accepted scheme %q not in allowed set %v", scheme, schemes)
 			}
-			host := u.Hostname()
+			host := strings.TrimRight(u.Hostname(), ".")
 			if addr, addrErr := netip.ParseAddr(host); addrErr == nil {
-				if !IsPublicAddr(addr) {
-					t.Fatalf("validateURLWithSchemes accepted non-public IP %s in URL %s", host, rawURL)
+				// Independent oracle (see FuzzValidateURL): assert against re-derived
+				// blocked ranges + stdlib classifiers, not against IsPublicAddr.
+				canonical := addr.Unmap()
+				if canonical.IsLoopback() || canonical.IsPrivate() ||
+					canonical.IsLinkLocalUnicast() || canonical.IsMulticast() ||
+					canonical.IsUnspecified() {
+					t.Fatalf("validateURLWithSchemes accepted stdlib-classified non-public IP %s in URL %s", addr, rawURL)
+				}
+				for _, br := range independentBlockedRanges {
+					if br.prefix.Contains(canonical) {
+						t.Fatalf("validateURLWithSchemes accepted IP %s in blocked range %s (%s) in URL %s", addr, br.prefix, br.name, rawURL)
+					}
 				}
 			}
 		}
