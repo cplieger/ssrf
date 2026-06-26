@@ -357,15 +357,30 @@ func isNumericLabel(l string) bool {
 		return false
 	}
 	if len(l) > 2 && l[0] == '0' && (l[1] == 'x' || l[1] == 'X') {
-		for _, c := range l[2:] {
-			isHexDigit := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-			if !isHexDigit {
-				return false
-			}
-		}
-		return true
+		return isHexDigits(l[2:])
 	}
-	for _, c := range l {
+	return isDecimalDigits(l)
+}
+
+// isHexDigits reports whether every rune in s is a hexadecimal digit. An empty
+// s reports true (vacuous); isNumericLabel only calls it with a non-empty tail.
+func isHexDigits(s string) bool {
+	for _, c := range s {
+		if !isHexDigit(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// isHexDigit reports whether c is a hexadecimal digit (0-9, a-f, A-F).
+func isHexDigit(c rune) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// isDecimalDigits reports whether every rune in s is a decimal digit (0-9).
+func isDecimalDigits(s string) bool {
+	for _, c := range s {
 		if c < '0' || c > '9' {
 			return false
 		}
@@ -493,30 +508,39 @@ func isPublicAddr(addr netip.Addr) bool {
 // addr must already be unmapped (callers guarantee this via isPublicAddr).
 func isNonRoutableRange(addr netip.Addr) bool {
 	if addr.Is4() {
-		if ietfProtoAssign.Contains(addr) ||
-			testNet1.Contains(addr) ||
-			testNet2.Contains(addr) ||
-			testNet3.Contains(addr) ||
-			benchmarking4.Contains(addr) ||
-			sixToFourRelay.Contains(addr) {
-			return true
-		}
+		return isNonRoutableV4(addr)
 	}
 	if addr.Is6() {
-		// nat64Local (RFC 8215 64:ff9b:1::/48) is blocked outright: its
-		// RFC 6052 /48 IPv4-embedding offset differs from the well-known
-		// /96, so extracting bytes 12-15 would risk an SSRF bypass.
-		if discardOnly.Contains(addr) ||
-			benchmarking6.Contains(addr) ||
-			documentation.Contains(addr) ||
-			doc6New.Contains(addr) ||
-			srv6SIDs.Contains(addr) ||
-			siteLocal.Contains(addr) ||
-			nat64Local.Contains(addr) {
-			return true
-		}
+		return isNonRoutableV6(addr)
 	}
 	return false
+}
+
+// isNonRoutableV4 reports whether addr is in an IPv4 documentation,
+// benchmarking, IETF-protocol-assignment, or deprecated 6to4-relay range.
+func isNonRoutableV4(addr netip.Addr) bool {
+	return ietfProtoAssign.Contains(addr) ||
+		testNet1.Contains(addr) ||
+		testNet2.Contains(addr) ||
+		testNet3.Contains(addr) ||
+		benchmarking4.Contains(addr) ||
+		sixToFourRelay.Contains(addr)
+}
+
+// isNonRoutableV6 reports whether addr is in an IPv6 discard, benchmarking,
+// documentation, SRv6-SID, deprecated site-local, or local-NAT64 range.
+//
+// nat64Local (RFC 8215 64:ff9b:1::/48) is blocked outright: its RFC 6052 /48
+// IPv4-embedding offset differs from the well-known /96, so extracting bytes
+// 12-15 would risk an SSRF bypass.
+func isNonRoutableV6(addr netip.Addr) bool {
+	return discardOnly.Contains(addr) ||
+		benchmarking6.Contains(addr) ||
+		documentation.Contains(addr) ||
+		doc6New.Contains(addr) ||
+		srv6SIDs.Contains(addr) ||
+		siteLocal.Contains(addr) ||
+		nat64Local.Contains(addr)
 }
 
 // embeddedIPv4IsPublic validates IPv4 addresses embedded in IPv6 transition
@@ -715,58 +739,79 @@ func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allow
 			return nil, portErr
 		}
 
-		dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
-		cancel()
+		safe, err := resolveAndValidate(ctx, resolver, policy, host, policyDenyKind)
 		if err != nil {
-			slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "dns_failed", "error", err)
-			return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: DNS lookup failed for %q", host), err)
+			return nil, err
 		}
-		if len(ips) == 0 {
-			slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "no_ips_resolved")
-			return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: no IPs resolved for %q", host), nil)
-		}
-
-		// Copy the slice so we never mutate the resolver's cached return value.
-		safe := make([]netip.Addr, len(ips))
-		for i := range ips {
-			safe[i] = ips[i].Unmap()
-			if !policy(safe[i]) {
-				slog.Default().Warn("ssrf dial blocked",
-					"host", host, "resolved_ip", safe[i].String(), "reason", reasonLabel(policyDenyKind))
-				return nil, ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
-			}
-		}
-
-		var lastErr error
-		// maxDialIPs is applied ONLY here, after the loop above validated every
-		// resolved IP and returned on the first non-public one (fail-closed). Do
-		// NOT hoist this truncation above that loop to skip validating IPs we
-		// won't dial: a resolver returning a few public IPs followed by internal
-		// ones would then succeed. The cap bounds dial *attempts* among the
-		// already-validated set; it must never gate which IPs get validated.
-		dialList := safe
-		if len(dialList) > maxDialIPs {
-			slog.Default().Warn("ssrf dial capped",
-				"host", host, "resolved", len(safe), "dialing", maxDialIPs)
-			dialList = dialList[:maxDialIPs]
-		}
-		for _, ip := range dialList {
-			if ctx.Err() != nil {
-				slog.Default().Debug("ssrf dial aborted",
-					"host", host, "reason", "context_cancelled", "error", ctx.Err())
-				return nil, fmt.Errorf("SSRF dial: context cancelled: %w", ctx.Err())
-			}
-			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			if dialErr == nil {
-				return conn, nil
-			}
-			lastErr = dialErr
-		}
-		slog.Default().Debug("ssrf dial failed",
-			"host", host, "ips_tried", len(dialList), "error", lastErr)
-		return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(dialList), host, lastErr)
+		return dialValidatedIPs(ctx, dialer, network, host, port, safe)
 	}
+}
+
+// resolveAndValidate resolves host with a bounded DNS timeout, then unmaps and
+// policy-validates EVERY returned IP, failing closed on the first non-public
+// one. It returns a freshly allocated slice (never aliasing the resolver's
+// cached return value) so the caller can cap dial attempts without affecting
+// which IPs are validated.
+func resolveAndValidate(ctx context.Context, resolver Resolver, policy Policy, host string, policyDenyKind ErrorKind) ([]netip.Addr, error) {
+	dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
+	cancel()
+	if err != nil {
+		slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "dns_failed", "error", err)
+		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: DNS lookup failed for %q", host), err)
+	}
+	if len(ips) == 0 {
+		slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "no_ips_resolved")
+		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: no IPs resolved for %q", host), nil)
+	}
+
+	// Copy the slice so we never mutate the resolver's cached return value.
+	safe := make([]netip.Addr, len(ips))
+	for i := range ips {
+		safe[i] = ips[i].Unmap()
+		if !policy(safe[i]) {
+			slog.Default().Warn("ssrf dial blocked",
+				"host", host, "resolved_ip", safe[i].String(), "reason", reasonLabel(policyDenyKind))
+			return nil, ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
+		}
+	}
+	return safe, nil
+}
+
+// dialValidatedIPs connects to the already-validated addresses in safe, capping
+// the number of dial ATTEMPTS at maxDialIPs to bound total dial time against an
+// attacker-controlled resolver returning many policy-passing-but-blackholed
+// IPs. The cap never gates validation (every address in safe was already
+// policy-checked); it only limits how many are dialed.
+func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, port string, safe []netip.Addr) (net.Conn, error) {
+	// maxDialIPs is applied ONLY here, after resolveAndValidate validated every
+	// resolved IP and failed closed on the first non-public one. Do NOT hoist
+	// this truncation into validation to skip validating IPs we won't dial: a
+	// resolver returning a few public IPs followed by internal ones would then
+	// succeed. The cap bounds dial *attempts* among the already-validated set;
+	// it must never gate which IPs get validated.
+	dialList := safe
+	if len(dialList) > maxDialIPs {
+		slog.Default().Warn("ssrf dial capped",
+			"host", host, "resolved", len(safe), "dialing", maxDialIPs)
+		dialList = dialList[:maxDialIPs]
+	}
+	var lastErr error
+	for _, ip := range dialList {
+		if ctx.Err() != nil {
+			slog.Default().Debug("ssrf dial aborted",
+				"host", host, "reason", "context_cancelled", "error", ctx.Err())
+			return nil, fmt.Errorf("SSRF dial: context cancelled: %w", ctx.Err())
+		}
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	slog.Default().Debug("ssrf dial failed",
+		"host", host, "ips_tried", len(dialList), "error", lastErr)
+	return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(dialList), host, lastErr)
 }
 
 // SafeTransport returns an *http.Transport hardened against SSRF and

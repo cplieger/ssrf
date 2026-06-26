@@ -1,24 +1,111 @@
 package ssrf
 
 import (
+	"fmt"
+	"net/netip"
 	"testing"
 
 	"pgregory.net/rapid"
 )
 
-func TestValidateURL_properties(t *testing.T) {
+// ValidateURL must reject every non-https scheme.
+func TestValidateURL_rejects_non_https_schemes(t *testing.T) {
 	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
-		scheme := rapid.SampledFrom([]string{schemeHTTPS, "http", "ftp", ""}).Draw(t, "scheme")
-		host := rapid.StringMatching(`[a-z0-9]{1,20}\.(com|org|net|io)`).Draw(t, "host")
-		path := rapid.StringMatching(`/[a-z0-9/]{0,20}`).Draw(t, "path")
+		scheme := rapid.SampledFrom([]string{"http", "ftp", "gopher", "file", "ssh", "ws", "wss"}).Draw(t, "scheme")
+		url := fmt.Sprintf("%s://example.com/file", scheme)
 
-		url := scheme + "://" + host + path
 		err := ValidateURL(url)
 
-		// Non-https schemes must always be rejected.
-		if scheme != schemeHTTPS && err == nil {
-			t.Fatalf("ValidateURL(%q) = nil, want error for non-https", url)
+		if err == nil {
+			t.Errorf("ValidateURL(%q) = nil, want error for non-https scheme", url)
+		}
+	})
+}
+
+// ValidateURL and IsPublicHost stay consistent: if ValidateURL accepts an https
+// URL with a given host, IsPublicHost must also accept that host.
+func TestValidateURL_IsPublicHost_consistency(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		// Domain-like hostnames with at least one dot (to pass the bare-name gate).
+		label := rapid.StringMatching(`[a-z]{3,10}`).Draw(t, "label")
+		tld := rapid.SampledFrom([]string{"com", "org", "net", "io"}).Draw(t, "tld")
+		host := label + "." + tld
+		url := fmt.Sprintf("https://%s/path", host)
+
+		urlErr := ValidateURL(url)
+		hostOK := IsPublicHost(host)
+
+		if urlErr == nil && !hostOK {
+			t.Errorf("ValidateURL(%q) = nil but IsPublicHost(%q) = false", url, host)
+		}
+	})
+}
+
+// isPublicAddr rejects all non-public IPv4 addresses (stdlib + re-derived
+// blocked-range oracle).
+func TestIsPublicAddr_rejects_all_non_public(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		b := rapid.SliceOfN(rapid.Byte(), 4, 4).Draw(t, "ipv4")
+		addr := netip.AddrFrom4([4]byte(b))
+		if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+			addr.IsMulticast() || addr.IsUnspecified() || sharedAddrSpace.Contains(addr) ||
+			thisHostNet.Contains(addr) || reserved240.Contains(addr) {
+			if isPublicAddr(addr) {
+				t.Errorf("isPublicAddr(%v) = true, want false for non-public address", addr)
+			}
+		}
+	})
+}
+
+// isPublicAddr rejects all non-public IPv6 addresses. Symmetric to the IPv4
+// property; closes the mutation gap where a flip on the IPv6 code path could
+// survive because only IPv4 addresses were randomly drawn.
+func TestIsPublicAddr_rejects_all_non_public_ipv6(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		b := rapid.SliceOfN(rapid.Byte(), 16, 16).Draw(t, "ipv6")
+		addr := netip.AddrFrom16([16]byte(b))
+		// Skip IPv4-mapped forms — covered by the mapped-consistency property
+		// and by Unmap() inside validateHost/safeDialContext.
+		if addr.Is4In6() || addr.Is4() {
+			return
+		}
+		if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+			addr.IsMulticast() || addr.IsUnspecified() {
+			if isPublicAddr(addr) {
+				t.Errorf("isPublicAddr(%v) = true, want false for non-public IPv6 address", addr)
+			}
+		}
+	})
+}
+
+// ValidateURL never panics on arbitrary input.
+func TestValidateURL_never_panics(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		input := rapid.String().Draw(t, "url")
+		_ = ValidateURL(input) // must not panic
+	})
+}
+
+// IPv4-mapped IPv6 addresses are rejected consistently with their IPv4
+// equivalents (defense-in-depth for CVE-2024-24790).
+func TestValidateURL_ipv4_mapped_ipv6_consistency(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		b := rapid.SliceOfN(rapid.Byte(), 4, 4).Draw(t, "ipv4")
+		addr := netip.AddrFrom4([4]byte(b))
+		if !isPublicAddr(addr) {
+			mapped := netip.AddrFrom16(addr.As16())
+			host := mapped.String()
+			url := fmt.Sprintf("https://[%s]/file.txt", host)
+			err := ValidateURL(url)
+			if err == nil {
+				t.Errorf("ValidateURL(%q) = nil, want error for IPv4-mapped IPv6 of non-public %v", url, addr)
+			}
 		}
 	})
 }
