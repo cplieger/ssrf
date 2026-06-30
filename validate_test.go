@@ -201,10 +201,21 @@ func TestValidateURL_rejects_noncanonical_ipv4(t *testing.T) {
 	t.Parallel()
 	rejected := []string{
 		"https://0177.0.0.1/x",    // dotted-octal loopback
-		"https://0x7f.0.0.1/x",    // dotted-hex loopback
+		"https://0x7f.0.0.1/x",    // dotted-hex loopback (mixed hex/decimal labels)
 		"https://127.1/x",         // short-form loopback
 		"https://169.254.16962/x", // oversized inet_aton link-local
 		"https://192.168.257/x",   // oversized inet_aton private
+		// Fully dotted-hex loopback encodings: every label is a 0x-prefixed hex
+		// integer, so each octet is classified by the hex-digit scanner (unlike
+		// the mixed encoding above, whose decimal octets bypass it). glibc
+		// getaddrinfo reads each of these as 127.0.0.x, so all must be rejected
+		// as non-canonical IPv4 encodings. The low/high hex digit in the final
+		// label (0, 9, a, F) exercises both ends of the decimal, lowercase, and
+		// uppercase hex-digit ranges.
+		"https://0x7f.0x0.0x0.0x1/x", // 127.0.0.1
+		"https://0x7f.0x0.0x0.0x9/x", // 127.0.0.9
+		"https://0x7f.0x0.0x0.0xa/x", // 127.0.0.10
+		"https://0x7f.0x0.0x0.0xF/x", // 127.0.0.15
 	}
 	for _, u := range rejected {
 		t.Run(u, func(t *testing.T) {
