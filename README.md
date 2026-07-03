@@ -2,7 +2,6 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v2.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v2)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/ssrf)](https://goreportcard.com/report/github.com/cplieger/ssrf)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13220/badge)](https://www.bestpractices.dev/projects/13220)
@@ -116,8 +115,6 @@ The transport uses **two layers** of IP validation:
 1. **Resolve-once** — DNS is resolved once, all IPs validated, then the dialer connects to the literal IP (prevents DNS rebinding via TOCTOU).
 2. **`net.Dialer.Control` hook** — validates the actually-connected IP at socket creation time, after the OS has resolved the address but before the TCP handshake. This mirrors the canonical pattern from [doyensec/safeurl](https://github.com/doyensec/safeurl), [Stripe smokescreen](https://github.com/stripe/smokescreen), and [mccutchen/safedialer](https://github.com/mccutchen/safedialer).
 
-Two hardening details protect this pairing. The dialer's `ControlContext` is cleared before the SSRF `Control` hook is installed, because a non-nil `ControlContext` takes precedence in `net.Dialer` and a caller-supplied one (via `WithDialer`) would otherwise bypass the socket-time check. And at most 8 already-validated IPs are dialed per host (`maxDialIPs`), which bounds dial time against a resolver that returns many valid-but-blackholed IPs, without ever skipping validation.
-
 ### Logging
 
 The library logs through `log/slog`'s default logger (`slog.Default()`); there is no logger to inject. Each enforcement rejection emits a single `Warn` line (`ssrf blocked`, `ssrf dial blocked`, `ssrf control blocked`, `ssrf redirect blocked`) with a bounded snake_case `reason` attribute (`non_public_ip`, `bad_port`, `too_many_redirects`, and so on) suitable for dashboard aggregation by reason. `IsPublicHost` is a silent predicate: it returns the same allow/deny decision as the enforcement path but emits no log, so you can pre-filter hosts without generating spurious `ssrf blocked` events.
@@ -168,6 +165,12 @@ The following features are intentionally NOT implemented:
 ## Security
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## Disclaimer
+
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
+
+This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 
