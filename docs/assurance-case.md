@@ -1,6 +1,6 @@
 # Security assurance case — ssrf
 
-This extends the fleet-wide
+This extends the shared
 [default assurance case](https://github.com/cplieger/.github/blob/main/assurance-case.md)
 with the threat model specific to `ssrf`. Read that first for the shared posture.
 
