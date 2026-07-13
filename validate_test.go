@@ -139,6 +139,7 @@ func TestIsPublicHost(t *testing.T) {
 		{"localhost trailing dot", "localhost.", false},
 		{"localhost double trailing dot", "localhost..", false},
 		{"loopback", "127.0.0.1", false},
+		{"loopback trailing whitespace", "127.0.0.1 ", false},
 		{"private", "192.168.1.1", false},
 		{"bare hostname", "internal", false},
 		{"empty", "", false},
@@ -154,6 +155,14 @@ func TestIsPublicHost(t *testing.T) {
 		{"bracketed IPv4-mapped loopback rejected", "[::ffff:127.0.0.1]", false},
 		{"bracketed embedded-IPv4 documentation rejected", "[2001:db8::1.2.3.4]", false},
 		{"bracketed public IPv6 accepted", "[2606:4700:4700::1111]", true},
+
+		// Trailing-dot-after-bracket bypass (h-f1): a trailing FQDN dot after
+		// the closing bracket must not defeat the bracket-strip guard and let a
+		// bracketed internal literal fall through as PUBLIC.
+		{"bracketed IPv4-mapped private trailing dot rejected", "[::ffff:192.168.1.1].", false},
+		{"bracketed IPv4-mapped loopback trailing dot rejected", "[::ffff:127.0.0.1].", false},
+		{"bracketed IPv4-mapped private double trailing dot rejected", "[::ffff:10.0.0.1]..", false},
+		{"bracketed public IPv6 trailing dot accepted", "[2606:4700:4700::1111].", true},
 
 		// RFC 6890 this-host block beyond IsUnspecified.
 		{"this-host 0.1.2.3", "0.1.2.3", false},
@@ -405,11 +414,12 @@ func TestValidateURL_enforcement_still_logs(t *testing.T) {
 	}
 }
 
-// validateHost is the enforcement wrapper: each rejection Kind maps to a
-// distinct "reason" attribute on the "ssrf blocked" Warn, which block
-// dashboards group on. This pins the Kind->reason mapping so a swapped
-// switch arm (a mutant) is caught. Not parallel: it mutates slog.Default().
-func TestValidateHost_emits_reason_per_kind(t *testing.T) {
+// ValidateURL is the enforcement path: each rejection Kind maps to a distinct
+// "reason" attribute on the "ssrf blocked" Warn (emitted by
+// validateURLWithSchemes), which block dashboards group on. This pins the
+// Kind->reason mapping so a swapped map entry (a mutant) is caught. Not
+// parallel: it mutates slog.Default().
+func TestValidateURL_emits_reason_per_kind(t *testing.T) {
 	cases := []struct {
 		name       string
 		host       string
@@ -427,13 +437,42 @@ func TestValidateHost_emits_reason_per_kind(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 			defer slog.SetDefault(prev)
 
-			if err := validateHost(tc.host); err == nil {
-				t.Fatalf("validateHost(%q) = nil, want error", tc.host)
+			if err := ValidateURL("https://" + tc.host); err == nil {
+				t.Fatalf("ValidateURL(https://%s) = nil, want error", tc.host)
 			}
 
 			got := buf.String()
 			if !strings.Contains(got, "reason="+tc.wantReason) {
-				t.Errorf("validateHost(%q) block log = %q, want reason=%q", tc.host, got, tc.wantReason)
+				t.Errorf("ValidateURL(https://%s) block log = %q, want reason=%q", tc.host, got, tc.wantReason)
+			}
+		})
+	}
+}
+
+// Direct IsPublicHost predicate coverage (l-f2): the suite pins non-canonical
+// numeric IPv4 encodings and interior-whitespace shapes through ValidateURL and
+// a one-way fuzz oracle, but never asserts the predicate itself returns false
+// for them. This pins both guards directly, so removing the looksLikeNumericIPv4
+// gate or the interior-whitespace check fails here even if the enforcement-path
+// tests are untouched.
+func TestIsPublicHost_rejects_noncanonical_ipv4_and_whitespace(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"0177.0.0.1",            // dotted-octal loopback
+		"0x7f.0.0.1",            // dotted-hex loopback (mixed hex/decimal labels)
+		"127.1",                 // short-form loopback
+		"169.254.16962",         // oversized inet_aton link-local
+		"192.168.257",           // oversized inet_aton private
+		"0x7f.0x0.0x0.0x1",      // fully dotted-hex loopback
+		"127.0.0.1 example.com", // interior whitespace
+		"example .com",          // interior whitespace
+		"example.com\t.evil",    // interior tab
+	}
+	for _, host := range cases {
+		t.Run(host, func(t *testing.T) {
+			t.Parallel()
+			if IsPublicHost(host) {
+				t.Errorf("IsPublicHost(%q) = true, want false", host)
 			}
 		})
 	}

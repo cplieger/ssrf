@@ -23,7 +23,6 @@ package ssrf
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -220,32 +219,43 @@ func ValidateURL(raw string) error {
 	return validateURLWithSchemes(raw, nil)
 }
 
-// validateURLWithSchemes validates a URL against a set of allowed schemes.
-// If schemes is nil, only HTTPS is allowed.
-func validateURLWithSchemes(raw string, schemes map[string]struct{}) error {
+// classifyURLWithSchemes is the SILENT classification core for a URL: it
+// returns the *Error describing why raw is unsafe (nil if safe) and performs
+// NO logging. It is the silent counterpart to [validateURLWithSchemes] (which
+// logs a "ssrf blocked" Warn on rejection), so the redirect policy can
+// re-validate a hop without emitting a spurious "ssrf blocked" line before its
+// own "ssrf redirect blocked". If schemes is nil, only HTTPS is allowed.
+func classifyURLWithSchemes(raw string, schemes map[string]struct{}) *Error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		slog.Default().Warn("ssrf blocked", "reason", "invalid_url", "error", err)
 		return ssrfErr(KindInvalidURL, "", "invalid URL", err)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if schemes == nil {
 		if scheme != schemeHTTPS {
-			slog.Default().Warn("ssrf blocked", "reason", "scheme", "scheme", u.Scheme)
 			return ssrfErr(KindBadScheme, "", fmt.Sprintf("URL scheme must be https, got %q", u.Scheme), nil)
 		}
-	} else {
-		if _, ok := schemes[scheme]; !ok {
-			slog.Default().Warn("ssrf blocked", "reason", "scheme", "scheme", u.Scheme)
-			return ssrfErr(KindBadScheme, "", fmt.Sprintf("URL scheme %q is not allowed", u.Scheme), nil)
-		}
+	} else if _, ok := schemes[scheme]; !ok {
+		return ssrfErr(KindBadScheme, "", fmt.Sprintf("URL scheme %q is not allowed", u.Scheme), nil)
 	}
 	host := u.Hostname()
 	if host == "" {
-		slog.Default().Warn("ssrf blocked", "reason", "empty_host")
 		return ssrfErr(KindEmptyHost, "", "URL has empty host", nil)
 	}
-	return validateHost(host)
+	return hostValidationError(host)
+}
+
+// validateURLWithSchemes validates a URL against a set of allowed schemes,
+// emitting a single "ssrf blocked" Warn on rejection (the enforcement path). It
+// is the thin logging wrapper around [classifyURLWithSchemes]; the redirect
+// policy uses the silent core directly to avoid a duplicate block log.
+// If schemes is nil, only HTTPS is allowed.
+func validateURLWithSchemes(raw string, schemes map[string]struct{}) error {
+	if verr := classifyURLWithSchemes(raw, schemes); verr != nil {
+		slog.Default().Warn("ssrf blocked", "host", verr.Host, "reason", reasonLabel(verr.Kind))
+		return verr
+	}
+	return nil
 }
 
 // IsPublicHost checks that a hostname is not a private/loopback/CGNAT address.
@@ -269,12 +279,20 @@ func IsPublicAddr(addr netip.Addr) bool {
 	return isPublicAddr(addr)
 }
 
-// hostValidationError returns the SSRF *Error describing why host is not a
-// public hostname, or nil if it is public. It performs NO logging — it is the
-// shared classification core. The enforcement wrapper [validateHost] logs a
-// "ssrf blocked" Warn on rejection; the [IsPublicHost] predicate uses this core
-// directly and stays silent (a query is not a block).
-func hostValidationError(host string) *Error {
+// normalizeHostForValidation trims and canonicalizes host for the public-host
+// classification core, returning the cleaned host or the *Error for the
+// whitespace and empty-host rejections it detects along the way (nil error when
+// host is well-formed enough to classify).
+func normalizeHostForValidation(host string) (string, *Error) {
+	// Trim surrounding ASCII whitespace and fail closed on any interior
+	// whitespace: no IP literal or DNS label contains whitespace, so a
+	// space-padded internal literal ("127.0.0.1 ") must not slip past the
+	// dotted-hostname fallthrough as PUBLIC.
+	host = strings.TrimSpace(host)
+	if strings.ContainsAny(host, " \t\r\n") {
+		return host, ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL host contains whitespace: %q", host), nil)
+	}
+
 	// URL-authority bracket syntax wraps IPv6 literals ("[::1]",
 	// "[2606:4700:4700::1111]", "[::ffff:192.168.1.1]"). netip.ParseAddr rejects
 	// the brackets, so a bracketed IPv4-mapped/embedded-IPv4 internal literal
@@ -285,14 +303,31 @@ func hostValidationError(host string) *Error {
 	// public IPv6 literal stays public, an internal one is correctly rejected.
 	// ValidateURL never reaches here with brackets; this guards direct
 	// IsPublicHost callers passing raw URL-authority syntax.
+	// Strip trailing dots (FQDN notation) first so a trailing dot after the
+	// closing bracket ("[::ffff:192.168.1.1].") cannot defeat the bracket-strip
+	// guard and let a bracketed internal literal fall through as PUBLIC.
+	host = strings.TrimRight(host, ".")
 	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
 		host = host[1 : len(host)-1]
 	}
-
-	// Strip all trailing dots (FQDN notation).
+	// Trim again in case the dots were inside the brackets.
 	host = strings.TrimRight(host, ".")
 	if host == "" {
-		return ssrfErr(KindEmptyHost, host, "empty host", nil)
+		return host, ssrfErr(KindEmptyHost, host, "empty host", nil)
+	}
+	return host, nil
+}
+
+// hostValidationError returns the SSRF *Error describing why host is not a
+// public hostname, or nil if it is public. It performs NO logging — it is the
+// shared classification core. The enforcement path [validateURLWithSchemes]
+// (via [ValidateURL]) logs a "ssrf blocked" Warn on rejection; the
+// [IsPublicHost] predicate uses this core directly and stays silent (a query is
+// not a block).
+func hostValidationError(host string) *Error {
+	host, verr := normalizeHostForValidation(host)
+	if verr != nil {
+		return verr
 	}
 
 	if strings.EqualFold(host, "localhost") {
@@ -388,59 +423,40 @@ func isDecimalDigits(s string) bool {
 	return true
 }
 
-// reasonLabel maps an ErrorKind to the bounded, low-cardinality "reason"
-// label emitted by the host-validation path ([validateHost], via [ValidateURL]),
-// the redirect policy, and the policy-denial branch of the socket-level paths
-// ([safeControl], [safeDialContext]) -- which pass KindNonPublicIP by default or
-// KindPolicyDenied under a custom [WithPolicy]. The socket-level paths' structural
-// rejections and port checks (checkAllowedPort) intentionally emit their own
-// finer-grained inline labels (e.g. "no_ips_resolved", "disallowed_network",
-// "unparseable_ip", "invalid_address", "dns_failed", "port_not_allowed") that do
-// NOT flow through this helper. Every reason value is a bounded snake_case constant
-// so Loki/Grafana can aggregate blocks by reason. Keep this switch in sync with the
-// Kinds routed through it: a new Kind emitted by any of those paths needs a case
-// here, else it silently degrades to "blocked". Never embed hosts/IPs in any reason
-// label.
-func reasonLabel(kind ErrorKind) string {
-	switch kind {
-	case KindInvalidURL:
-		return "invalid_url"
-	case KindBadScheme:
-		return "scheme"
-	case KindEmptyHost:
-		return "empty_host"
-	case KindLocalhost:
-		return "localhost"
-	case KindBareHostname:
-		return "bare_hostname"
-	case KindNonPublicIP:
-		return "non_public_ip"
-	case KindDNSFailed:
-		return "dns_failed"
-	case KindPolicyDenied:
-		return "policy_denied"
-	case KindBadPort:
-		return "bad_port"
-	case KindTooManyRedirects:
-		return "too_many_redirects"
-	default:
-		return "blocked"
-	}
+// reasonLabels is the bounded, low-cardinality label table backing
+// [reasonLabel]. Keep it in sync with the Kinds routed through that helper: a
+// new Kind without an entry here silently degrades to "blocked". Every value is
+// a snake_case constant and never embeds a host or IP.
+var reasonLabels = map[ErrorKind]string{
+	KindInvalidURL:       "invalid_url",
+	KindBadScheme:        "scheme",
+	KindEmptyHost:        "empty_host",
+	KindLocalhost:        "localhost",
+	KindBareHostname:     "bare_hostname",
+	KindNonPublicIP:      "non_public_ip",
+	KindDNSFailed:        "dns_failed",
+	KindPolicyDenied:     "policy_denied",
+	KindBadPort:          "bad_port",
+	KindTooManyRedirects: "too_many_redirects",
 }
 
-// validateHost is the enforcement wrapper around [hostValidationError]: on
-// rejection it emits a "ssrf blocked" Warn (the ValidateURL / redirect-policy
-// path, where a block is a real security event) and returns the error; it
-// returns nil for a public host. Predicate callers use hostValidationError
-// directly to stay silent — see [IsPublicHost].
-func validateHost(host string) error {
-	verr := hostValidationError(host)
-	if verr == nil {
-		return nil
+// reasonLabel maps an ErrorKind to the bounded, low-cardinality "reason" label
+// emitted by the host-validation path ([validateURLWithSchemes], via
+// [ValidateURL]), the redirect policy, and the policy-denial branch of the
+// socket-level paths ([safeControl], [safeDialContext]) -- which pass
+// KindNonPublicIP by default or KindPolicyDenied under a custom [WithPolicy].
+// The socket-level paths' structural rejections and port checks
+// (checkAllowedPort) intentionally emit their own finer-grained inline labels
+// (e.g. "no_ips_resolved", "disallowed_network", "unparseable_ip",
+// "invalid_address", "dns_failed", "port_not_allowed") that do NOT flow through
+// this helper. A Kind with no entry in the [reasonLabels] table degrades to
+// "blocked"; add an entry there when a routed path emits a new Kind. Never
+// embed hosts/IPs in any reason label.
+func reasonLabel(kind ErrorKind) string {
+	if label, ok := reasonLabels[kind]; ok {
+		return label
 	}
-	reason := reasonLabel(verr.Kind)
-	slog.Default().Warn("ssrf blocked", "host", verr.Host, "reason", reason)
-	return verr
+	return "blocked"
 }
 
 // --- Blocked ranges ---
@@ -486,22 +502,33 @@ func isPublicAddr(addr netip.Addr) bool {
 	// operate on the canonical IPv4 form. Without this, IPv4 prefix checks
 	// (e.g. sharedAddrSpace) would miss mapped addresses.
 	addr = addr.Unmap()
-	if addr.IsLoopback() ||
-		addr.IsPrivate() ||
-		addr.IsLinkLocalUnicast() ||
-		addr.IsMulticast() ||
-		addr.IsUnspecified() ||
-		sharedAddrSpace.Contains(addr) ||
-		thisHostNet.Contains(addr) ||
-		reserved240.Contains(addr) {
-		return false
-	}
-
-	if isNonRoutableRange(addr) {
+	if isStdlibBlockedAddr(addr) || isBaseBlockedAddr(addr) || isNonRoutableRange(addr) {
 		return false
 	}
 
 	return embeddedIPv4IsPublic(addr)
+}
+
+// isStdlibBlockedAddr reports whether addr falls in a range the netip stdlib
+// predicates already classify as non-global: loopback, private (RFC 1918 /
+// RFC 4193), link-local unicast, multicast, or unspecified. addr must already
+// be unmapped (callers guarantee this via isPublicAddr).
+func isStdlibBlockedAddr(addr netip.Addr) bool {
+	return addr.IsLoopback() ||
+		addr.IsPrivate() ||
+		addr.IsLinkLocalUnicast() ||
+		addr.IsMulticast() ||
+		addr.IsUnspecified()
+}
+
+// isBaseBlockedAddr reports whether addr is in the RFC 6598 CGNAT shared
+// space, the RFC 6890 "this host" 0.0.0.0/8 net, or the RFC 1112 reserved
+// 240.0.0.0/4 former Class E range. addr must already be unmapped (callers
+// guarantee this via isPublicAddr).
+func isBaseBlockedAddr(addr netip.Addr) bool {
+	return sharedAddrSpace.Contains(addr) ||
+		thisHostNet.Contains(addr) ||
+		reserved240.Contains(addr)
 }
 
 // isNonRoutableRange checks documentation/benchmarking/discard ranges.
@@ -544,49 +571,51 @@ func isNonRoutableV6(addr netip.Addr) bool {
 }
 
 // embeddedIPv4IsPublic validates IPv4 addresses embedded in IPv6 transition
-// mechanism wrappers (6to4, NAT64, Teredo, IPv4-compatible).
+// mechanism wrappers (6to4, NAT64, Teredo, IPv4-compatible). For each wrapper
+// whose prefix contains addr, the embedded IPv4 is extracted and re-validated
+// through isPublicAddr; a wrapper whose prefix does not match contributes no
+// constraint. Byte extraction is cheap and pure, so it is done unconditionally
+// and the result is consulted only when the wrapper is active.
 func embeddedIPv4IsPublic(addr netip.Addr) bool {
-	if sixToFour.Contains(addr) {
-		// RFC 3056: 2002:V4ADDR::/48 -- 32-bit IPv4 is bytes 2-5 (after 0x2002).
-		b := addr.As16()
-		embedded := netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})
-		if !isPublicAddr(embedded) {
-			return false
-		}
+	b := addr.As16()
+	// RFC 3056: 2002:V4ADDR::/48 -- 32-bit IPv4 is bytes 2-5 (after 0x2002).
+	if !embeddedAddrIsPublic(sixToFour.Contains(addr), netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})) {
+		return false
 	}
-	if nat64Wellknown.Contains(addr) {
-		// RFC 6052 sec 2.2: for the /96 well-known prefix IPv4 is the last 32 bits, bytes 12-15.
-		b := addr.As16()
-		embedded := netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
-		if !isPublicAddr(embedded) {
-			return false
-		}
+	// RFC 6052 sec 2.2: for the /96 well-known prefix IPv4 is the last 32 bits, bytes 12-15.
+	if !embeddedAddrIsPublic(nat64Wellknown.Contains(addr), netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})) {
+		return false
 	}
-	if teredoPrefix.Contains(addr) {
-		// RFC 4380 sec 4: bytes 4-7 = Teredo server IPv4; bytes 12-15 = client IPv4
-		// stored bitwise-inverted (XOR 0xffffffff / ^0xFF per byte) so it is obscured
-		// in the packet header. The inversion is load-bearing: without it an attacker
-		// could encode an internal client IP as its bitwise inverse and pass the check.
-		b := addr.As16()
-		clientIP := netip.AddrFrom4([4]byte{b[12] ^ 0xFF, b[13] ^ 0xFF, b[14] ^ 0xFF, b[15] ^ 0xFF})
-		if !isPublicAddr(clientIP) {
-			return false
-		}
-		serverIP := netip.AddrFrom4([4]byte{b[4], b[5], b[6], b[7]})
-		if !isPublicAddr(serverIP) {
-			return false
-		}
+	// RFC 4380 sec 4: bytes 4-7 = Teredo server IPv4; bytes 12-15 = client IPv4
+	// stored bitwise-inverted (see teredoClientIPv4). Both embedded IPv4s must
+	// be public for the Teredo address to be treated as public.
+	if teredoPrefix.Contains(addr) && (!isPublicAddr(teredoClientIPv4(b)) || !isPublicAddr(teredoServerIPv4(b))) {
+		return false
 	}
-	if ipv4Compat.Contains(addr) && !addr.IsUnspecified() {
-		// RFC 4291 sec 2.5.5.1: deprecated IPv4-compatible ::a.b.c.d -- IPv4 is bytes 12-15.
-		// IsUnspecified guard excludes :: (all-zeros).
-		b := addr.As16()
-		embedded := netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
-		if !isPublicAddr(embedded) {
-			return false
-		}
-	}
-	return true
+	// RFC 4291 sec 2.5.5.1: deprecated IPv4-compatible ::a.b.c.d -- IPv4 is bytes 12-15.
+	// IsUnspecified guard excludes :: (all-zeros).
+	return embeddedAddrIsPublic(ipv4Compat.Contains(addr) && !addr.IsUnspecified(), netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}))
+}
+
+// embeddedAddrIsPublic reports whether an embedded-IPv4 constraint is
+// satisfied: when the wrapper prefix is not active the constraint holds
+// vacuously; otherwise the embedded addr must itself be public.
+func embeddedAddrIsPublic(active bool, addr netip.Addr) bool {
+	return !active || isPublicAddr(addr)
+}
+
+// teredoClientIPv4 extracts the Teredo client IPv4 (RFC 4380 sec 4, bytes
+// 12-15). It is stored bitwise-inverted (XOR 0xffffffff / ^0xFF per byte) so it
+// is obscured in the packet header. The inversion is load-bearing: without it
+// an attacker could encode an internal client IP as its bitwise inverse and
+// pass the check.
+func teredoClientIPv4(b [16]byte) netip.Addr {
+	return netip.AddrFrom4([4]byte{b[12] ^ 0xFF, b[13] ^ 0xFF, b[14] ^ 0xFF, b[15] ^ 0xFF})
+}
+
+// teredoServerIPv4 extracts the Teredo server IPv4 (RFC 4380 sec 4, bytes 4-7).
+func teredoServerIPv4(b [16]byte) netip.Addr {
+	return netip.AddrFrom4([4]byte{b[4], b[5], b[6], b[7]})
 }
 
 // SafeRedirectPolicy returns an http.Client CheckRedirect function that
@@ -615,17 +644,16 @@ func SafeRedirectPolicyWithSchemes(
 				"reason", "too_many_redirects", "hops", len(via))
 			return ssrfErr(KindTooManyRedirects, "", fmt.Sprintf("stopped after %d redirects", maxRedirects), nil)
 		}
-		if err := validateURLWithSchemes(req.URL.String(), schemes); err != nil {
-			// Propagate the inner Kind so a caller inspecting
+		if verr := classifyURLWithSchemes(req.URL.String(), schemes); verr != nil {
+			// Use the silent classification core so only "ssrf redirect
+			// blocked" is emitted (not a duplicate inner "ssrf blocked"). The
+			// inner Kind is propagated so a caller inspecting
 			// errors.As(&ssrf.Error).Kind sees the real reason (bad scheme,
 			// empty host, non-public IP, ...) rather than a blanket value.
-			kind := KindNonPublicIP
-			if ie, ok := errors.AsType[*Error](err); ok {
-				kind = ie.Kind
-			}
+			kind := verr.Kind
 			slog.Default().Warn("ssrf redirect blocked",
-				"url", req.URL.Redacted(), "reason", reasonLabel(kind), "error", err)
-			return ssrfErr(kind, req.URL.Hostname(), "redirect blocked (SSRF): "+err.Error(), err)
+				"url", req.URL.Redacted(), "reason", reasonLabel(kind), "error", verr)
+			return ssrfErr(kind, req.URL.Hostname(), "redirect blocked (SSRF): "+verr.Error(), verr)
 		}
 		if next != nil {
 			return next(req, via)

@@ -69,7 +69,7 @@ func TestIsPublicAddr_rejects_all_non_public_ipv6(t *testing.T) {
 		b := rapid.SliceOfN(rapid.Byte(), 16, 16).Draw(t, "ipv6")
 		addr := netip.AddrFrom16([16]byte(b))
 		// Skip IPv4-mapped forms — covered by the mapped-consistency property
-		// and by Unmap() inside validateHost/safeDialContext.
+		// and by Unmap() inside hostValidationError/safeDialContext.
 		if addr.Is4In6() || addr.Is4() {
 			return
 		}
@@ -106,6 +106,34 @@ func TestValidateURL_ipv4_mapped_ipv6_consistency(t *testing.T) {
 			if err == nil {
 				t.Errorf("ValidateURL(%q) = nil, want error for IPv4-mapped IPv6 of non-public %v", url, addr)
 			}
+		}
+	})
+}
+
+// ValidateURL must reject any host made of two-or-more all-numeric labels that
+// netip.ParseAddr does not parse as a canonical IP — the non-canonical IPv4
+// encoding class (dotted-octal/hex, short-form, oversized inet_aton) that a
+// libc resolver would still resolve to an internal address. The library's own
+// contract (isNumericLabel: "a real DNS name never has an all-numeric label
+// set") makes this a total invariant, not an example. Uses only fmt/netip/rapid
+// (already imported). A mutant removing the looksLikeNumericIPv4 gate lets these
+// fall through the has-a-dot hostname arm and be accepted, failing this property.
+func TestValidateURL_numeric_ipv4_encodings_rejected(t *testing.T) {
+	t.Parallel()
+	rapid.Check(t, func(t *rapid.T) {
+		host := fmt.Sprintf("%d.%d",
+			rapid.IntRange(0, 100000).Draw(t, "a"),
+			rapid.IntRange(0, 100000).Draw(t, "b"))
+		if rapid.Bool().Draw(t, "third") {
+			host = fmt.Sprintf("%s.%d", host, rapid.IntRange(0, 100000).Draw(t, "c"))
+		}
+		// A canonically parseable IP is isPublicAddr's job, covered elsewhere.
+		if _, err := netip.ParseAddr(host); err == nil {
+			return
+		}
+		url := fmt.Sprintf("https://%s/x", host)
+		if err := ValidateURL(url); err == nil {
+			t.Errorf("ValidateURL(%q) = nil, want rejection of non-canonical numeric IPv4 encoding", url)
 		}
 	})
 }

@@ -134,6 +134,7 @@ IPv4 (RFC 6890 + RFC 5737 + RFC 2544):
 IPv6:
 
 - Loopback, ULA, link-local, multicast, unspecified
+- `fec0::/10` (deprecated site-local, RFC 3879)
 - `100::/64` (Discard-Only, RFC 6666)
 - `2001:2::/48` (Benchmarking, RFC 5180)
 - `2001:db8::/32` (Documentation, RFC 3849)
