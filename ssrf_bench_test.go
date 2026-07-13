@@ -56,35 +56,35 @@ func BenchmarkIsPublicAddr_6to4Embed(b *testing.B) {
 	}
 }
 
-// --- validateHost benchmarks: hostname/IP classification ---
+// --- host-classification benchmarks: ValidateURL host/IP classification ---
 
 func BenchmarkValidateHost_PublicIP(b *testing.B) {
 	for b.Loop() {
-		validateHost("93.184.216.34")
+		ValidateURL("https://93.184.216.34")
 	}
 }
 
 func BenchmarkValidateHost_PrivateIP(b *testing.B) {
 	for b.Loop() {
-		validateHost("192.168.1.1")
+		ValidateURL("https://192.168.1.1")
 	}
 }
 
 func BenchmarkValidateHost_Localhost(b *testing.B) {
 	for b.Loop() {
-		validateHost("localhost")
+		ValidateURL("https://localhost")
 	}
 }
 
 func BenchmarkValidateHost_DottedHostname(b *testing.B) {
 	for b.Loop() {
-		validateHost("api.example.com")
+		ValidateURL("https://api.example.com")
 	}
 }
 
 func BenchmarkValidateHost_BareHostname(b *testing.B) {
 	for b.Loop() {
-		validateHost("internal")
+		ValidateURL("https://internal")
 	}
 }
 

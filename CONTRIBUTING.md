@@ -45,11 +45,13 @@ These are the parts a change can silently break. Treat them as contracts.
   resolver returning many valid-but-blackholed IPs without ever skipping a
   check (fail-closed).
 - **`IsPublicHost` is a silent predicate; only enforcement logs.**
-  `IsPublicHost` and `validateHost` share one classification core
-  (`hostValidationError`), but only the enforcement wrapper (`validateHost`,
-  used by `ValidateURL` and the dial/redirect paths) emits a `slog.Warn`. Keep
-  `IsPublicHost` log-free so callers can probe host publicness without
-  polluting block dashboards. All logging goes through `slog.Default()` (there
+  `IsPublicHost` and the enforcement path share one classification core
+  (`hostValidationError`), but only the enforcement wrapper
+  (`validateURLWithSchemes`, reached via `ValidateURL`) emits a `slog.Warn`; the
+  redirect policy re-validates each hop through the silent core
+  (`classifyURLWithSchemes`) and emits its own single `ssrf redirect blocked`
+  line. Keep `IsPublicHost` log-free so callers can probe host publicness
+  without polluting block dashboards. All logging goes through `slog.Default()` (there
   is no per-instance logger option), and every block log carries a bounded
   snake_case `reason` from `reasonLabel(ErrorKind)`; never put a host or IP in
   the `reason` attribute (use the `error` key for detail) or block-dashboard

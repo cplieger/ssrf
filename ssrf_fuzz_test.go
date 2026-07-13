@@ -334,6 +334,28 @@ func FuzzIsPublicHost(f *testing.F) {
 	f.Add("10.0.0.1")
 	f.Add("::1")
 	f.Add("internal")
+	// Non-canonical IPv4 encodings (looksLikeNumericIPv4 gate) — the fuzz oracle in
+	// FuzzValidateURL/FuzzValidateURLWithSchemes deliberately skips these because
+	// netip.ParseAddr rejects them, so FuzzIsPublicHost's consistency oracle is the
+	// only fuzz coverage of this bypass class. Seed it so the shallow 2-min weekly
+	// run starts from these inputs instead of re-discovering them.
+	f.Add("0177.0.0.1")       // dotted-octal loopback
+	f.Add("0x7f.0.0.1")       // dotted-hex loopback
+	f.Add("127.1")            // short-form loopback
+	f.Add("192.168.257")      // oversized inet_aton private
+	f.Add("0x7f.0x0.0x0.0x1") // fully dotted-hex loopback
+	// IPv6 transition-mechanism wrappers embedding private IPv4.
+	f.Add("2002:c0a8:0101::") // 6to4 embedding 192.168.1.1
+	f.Add("64:ff9b::7f00:1")  // NAT64 well-known embedding 127.0.0.1
+	f.Add("::127.0.0.1")      // deprecated IPv4-compatible embedding loopback
+	// Bracketed URL-authority literals (hostValidationError strips one bracket pair).
+	f.Add("[::ffff:192.168.1.1]")   // bracketed IPv4-mapped private
+	f.Add("[2606:4700:4700::1111]") // bracketed public IPv6 (must stay public)
+	// CGNAT boundary + public canonical anchors.
+	f.Add("100.64.0.1")     // CGNAT
+	f.Add("100.63.255.255") // just below CGNAT (public)
+	f.Add("8.8.8.8")        // public canonical IPv4
+	f.Add("2606:4700::1")   // public canonical IPv6
 	f.Fuzz(func(t *testing.T, host string) {
 		hostOk := IsPublicHost(host)
 		if !hostOk {
