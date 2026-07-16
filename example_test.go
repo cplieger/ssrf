@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cplieger/ssrf/v2"
+	"github.com/cplieger/ssrf/v3"
 )
 
 func ExampleValidateURL() {
@@ -26,4 +26,16 @@ func ExampleSafeRedirectPolicy() {
 		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
 	}
 	_ = client // use client for outbound requests
+}
+
+func ExampleURLPolicy() {
+	// Allow plain HTTP alongside HTTPS (e.g. for legacy endpoints).
+	policy := ssrf.NewURLPolicy("https", "http")
+	client := &http.Client{
+		Transport:     ssrf.SafeTransport(ssrf.WithAllowedPorts(443, 80)),
+		CheckRedirect: policy.RedirectPolicy(nil),
+	}
+	_ = client
+	fmt.Println(policy.Validate("https://example.com/data.json"))
+	// Output: <nil>
 }

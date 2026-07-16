@@ -96,7 +96,7 @@ func TestSafeTransport_defaultDialerKeepAlive(t *testing.T) {
 	// all-ports open the dial path to the local listener.
 	allowAll := func(netip.Addr) bool { return true }
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
-	tr := SafeTransport(WithResolver(r), WithPolicy(allowAll), WithAllowedPorts())
+	tr := SafeTransport(WithResolver(r), WithAddressPolicy(allowAll), WithAnyPort())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

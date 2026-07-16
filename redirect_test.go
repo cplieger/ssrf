@@ -168,10 +168,9 @@ func TestSafeRedirectPolicy_nil_next_under_limit_allows(t *testing.T) {
 	}
 }
 
-func TestSafeRedirectPolicyWithSchemes_blocks_disallowed(t *testing.T) {
+func TestURLPolicyRedirectPolicy_blocks_disallowed(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}}
-	policy := SafeRedirectPolicyWithSchemes(schemes, nil)
+	policy := NewURLPolicy("https").RedirectPolicy(nil)
 	req, _ := newTestReq("http://example.com/f")
 	err := policy(req, nil)
 	if err == nil {
@@ -179,10 +178,9 @@ func TestSafeRedirectPolicyWithSchemes_blocks_disallowed(t *testing.T) {
 	}
 }
 
-func TestSafeRedirectPolicyWithSchemes_allows_configured(t *testing.T) {
+func TestURLPolicyRedirectPolicy_allows_configured(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}, "http": {}}
-	policy := SafeRedirectPolicyWithSchemes(schemes, nil)
+	policy := NewURLPolicy("https", "http").RedirectPolicy(nil)
 	req, _ := newTestReq("http://example.com/f")
 	err := policy(req, nil)
 	if err != nil {
@@ -190,19 +188,19 @@ func TestSafeRedirectPolicyWithSchemes_allows_configured(t *testing.T) {
 	}
 }
 
-func TestSafeRedirectPolicyWithSchemes_caps_and_delegates(t *testing.T) {
+func TestURLPolicyRedirectPolicy_caps_and_delegates(t *testing.T) {
 	t.Parallel()
 	called := false
 	next := func(_ *http.Request, _ []*http.Request) error {
 		called = true
 		return nil
 	}
-	policy := SafeRedirectPolicyWithSchemes(nil, next)
+	policy := URLPolicy{}.RedirectPolicy(next)
 
 	req, _ := newTestReq("https://example.com/file")
 	via := make([]*http.Request, 10)
 	if err := policy(req, via); err == nil {
-		t.Error("SafeRedirectPolicyWithSchemes() = nil, want error at 10-redirect cap")
+		t.Error("URLPolicy.RedirectPolicy() = nil, want error at 10-redirect cap")
 	}
 	if called {
 		t.Error("next called past the 10-redirect cap")
@@ -210,59 +208,36 @@ func TestSafeRedirectPolicyWithSchemes_caps_and_delegates(t *testing.T) {
 
 	// Under the cap, a valid https public target delegates to next.
 	if err := policy(req, nil); err != nil {
-		t.Errorf("SafeRedirectPolicyWithSchemes() = %v, want nil under cap", err)
+		t.Errorf("URLPolicy.RedirectPolicy() = %v, want nil under cap", err)
 	}
 	if !called {
-		t.Error("SafeRedirectPolicyWithSchemes() did not delegate to next under cap")
+		t.Error("URLPolicy.RedirectPolicy() did not delegate to next under cap")
 	}
 }
 
-func TestAllowedSchemes_helper(t *testing.T) {
+// NewURLPolicy with no schemes must return the HTTPS-only default, not an
+// empty fail-open (or fail-closed) scheme set.
+func TestNewURLPolicy_empty_is_https_default(t *testing.T) {
 	t.Parallel()
-	s := AllowedSchemes(WithAllowedSchemes("http", "https"))
-	if _, ok := s["http"]; !ok {
-		t.Error("AllowedSchemes should include http")
-	}
-	if _, ok := s["https"]; !ok {
-		t.Error("AllowedSchemes should include https")
-	}
-}
-
-func TestWithAllowedSchemes_empty_retains_default(t *testing.T) {
-	t.Parallel()
-	s := AllowedSchemes(WithAllowedSchemes())
-	if _, ok := s["https"]; !ok {
-		t.Errorf("AllowedSchemes(WithAllowedSchemes()) = %v, want https retained", s)
-	}
-	if len(s) != 1 {
-		t.Errorf("empty WithAllowedSchemes widened the set to %v, want {https}", s)
-	}
-}
-
-// A nil Option element in the AllowedSchemes variadic must be skipped, not
-// dereferenced (which would panic), and must not disturb the resulting set.
-func TestNilOption_AllowedSchemes(t *testing.T) {
-	t.Parallel()
-	s := AllowedSchemes(nil, nil, WithAllowedSchemes("https", "http"), nil)
-	if s == nil {
-		t.Fatal("AllowedSchemes with nil elements returned nil")
-	}
-	if _, ok := s["https"]; !ok {
-		t.Error("missing https in result")
-	}
-	if _, ok := s["http"]; !ok {
-		t.Error("missing http in result")
-	}
-}
-
-// A nil schemes map passed to SafeRedirectPolicyWithSchemes must default to
-// HTTPS-only (block http, allow https), and a nil next must be tolerated.
-func TestNilOption_SafeRedirectPolicyWithSchemes(t *testing.T) {
-	t.Parallel()
-	policy := SafeRedirectPolicyWithSchemes(nil, nil)
+	policy := NewURLPolicy().RedirectPolicy(nil)
 	req, _ := newTestReq("http://example.com/evil")
 	if err := policy(req, nil); err == nil {
-		t.Error("nil schemes map should default to HTTPS-only, blocking http")
+		t.Error("NewURLPolicy() should retain the HTTPS-only default, blocking http")
+	}
+	req2, _ := newTestReq("https://example.com/ok")
+	if err := policy(req2, nil); err != nil {
+		t.Errorf("HTTPS to public domain should pass, got: %v", err)
+	}
+}
+
+// The zero-value URLPolicy must default to HTTPS-only (block http, allow
+// https), and a nil next must be tolerated.
+func TestURLPolicy_zero_value_is_https_default(t *testing.T) {
+	t.Parallel()
+	policy := URLPolicy{}.RedirectPolicy(nil)
+	req, _ := newTestReq("http://example.com/evil")
+	if err := policy(req, nil); err == nil {
+		t.Error("zero-value URLPolicy should default to HTTPS-only, blocking http")
 	}
 	req2, _ := newTestReq("https://example.com/ok")
 	if err := policy(req2, nil); err != nil {

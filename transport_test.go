@@ -22,15 +22,15 @@ func (m *mockResolver) LookupNetIP(_ context.Context, _, _ string) ([]netip.Addr
 	return m.ips, m.err
 }
 
-// --- WithPolicy ---
+// --- WithAddressPolicy ---
 
-func TestWithPolicy_blocks_specific_host(t *testing.T) {
+func TestWithAddressPolicy_blocks_specific_host(t *testing.T) {
 	t.Parallel()
 	blocked := netip.MustParseAddr("8.8.8.8")
 	policy := func(addr netip.Addr) bool {
 		return addr != blocked
 	}
-	tr := SafeTransport(WithPolicy(policy))
+	tr := SafeTransport(WithAddressPolicy(policy))
 	dial := tr.DialContext
 
 	_, err := dial(context.Background(), "tcp", "8.8.8.8:443")
@@ -39,10 +39,10 @@ func TestWithPolicy_blocks_specific_host(t *testing.T) {
 	}
 }
 
-func TestWithPolicy_allows_normally_blocked_ip(t *testing.T) {
+func TestWithAddressPolicy_allows_normally_blocked_ip(t *testing.T) {
 	t.Parallel()
 	allowAll := func(_ netip.Addr) bool { return true }
-	tr := SafeTransport(WithPolicy(allowAll))
+	tr := SafeTransport(WithAddressPolicy(allowAll))
 	dial := tr.DialContext
 
 	// 127.0.0.1 is normally blocked; with allow-all policy it should
@@ -56,9 +56,9 @@ func TestWithPolicy_allows_normally_blocked_ip(t *testing.T) {
 	}
 }
 
-func TestWithPolicy_nil_uses_default(t *testing.T) {
+func TestWithAddressPolicy_nil_uses_default(t *testing.T) {
 	t.Parallel()
-	tr := SafeTransport(WithPolicy(nil))
+	tr := SafeTransport(WithAddressPolicy(nil))
 	dial := tr.DialContext
 
 	_, err := dial(context.Background(), "tcp", "127.0.0.1:443")
@@ -67,10 +67,10 @@ func TestWithPolicy_nil_uses_default(t *testing.T) {
 	}
 }
 
-func TestWithPolicy_deny_all(t *testing.T) {
+func TestWithAddressPolicy_deny_all(t *testing.T) {
 	t.Parallel()
 	denyAll := func(_ netip.Addr) bool { return false }
-	tr := SafeTransport(WithPolicy(denyAll))
+	tr := SafeTransport(WithAddressPolicy(denyAll))
 	dial := tr.DialContext
 
 	_, err := dial(context.Background(), "tcp", "1.1.1.1:443")
@@ -82,13 +82,13 @@ func TestWithPolicy_deny_all(t *testing.T) {
 	}
 }
 
-func TestWithPolicy_and_WithDialer_combined(t *testing.T) {
+func TestWithAddressPolicy_and_WithDialer_combined(t *testing.T) {
 	t.Parallel()
 	allowed := netip.MustParseAddr("198.41.0.4")
 	policy := func(addr netip.Addr) bool { return addr == allowed }
 	d := &net.Dialer{Timeout: 50 * time.Millisecond}
 
-	tr := SafeTransport(WithPolicy(policy), WithDialer(d))
+	tr := SafeTransport(WithAddressPolicy(policy), WithDialer(d))
 	dial := tr.DialContext
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -110,13 +110,14 @@ func TestWithPolicy_and_WithDialer_combined(t *testing.T) {
 	}
 }
 
-// A custom WithPolicy denial reports KindPolicyDenied (the documented "custom
-// policy rejected the IP" kind). 1.1.1.1 resolves to itself (literal IP, no
-// DNS), so the resolve-loop policy check denies it before any socket opens.
+// A custom WithAddressPolicy denial reports KindPolicyDenied (the documented
+// "custom policy rejected the IP" kind). 1.1.1.1 resolves to itself (literal
+// IP, no DNS), so the resolve-loop policy check denies it before any socket
+// opens.
 func TestSafeTransport_custom_policy_denial_kind(t *testing.T) {
 	t.Parallel()
 	denyAll := func(_ netip.Addr) bool { return false }
-	tr := SafeTransport(WithPolicy(denyAll))
+	tr := SafeTransport(WithAddressPolicy(denyAll))
 	_, err := tr.DialContext(context.Background(), "tcp", "1.1.1.1:443")
 	var ssrfError *Error
 	if !errors.As(err, &ssrfError) {
@@ -127,8 +128,8 @@ func TestSafeTransport_custom_policy_denial_kind(t *testing.T) {
 	}
 }
 
-// The default policy (no WithPolicy) must keep emitting KindNonPublicIP, not
-// KindPolicyDenied — the denyKind wiring must not alter default behavior.
+// The default policy (no WithAddressPolicy) must keep emitting KindNonPublicIP,
+// not KindPolicyDenied — the denyKind wiring must not alter default behavior.
 func TestSafeTransport_default_policy_denial_kind(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport()
@@ -256,8 +257,9 @@ func TestSafeTransport_returns_non_nil(t *testing.T) {
 	}
 }
 
-// A nil Option element in the variadic must be skipped (not dereferenced, which
-// would panic), and the default policy must still block private IPs.
+// A nil TransportOption element in the variadic must be skipped (not
+// dereferenced, which would panic), and the default policy must still block
+// private IPs.
 func TestSafeTransport_nil_option_element(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(nil, nil, WithAllowedPorts(443), nil)
@@ -270,7 +272,7 @@ func TestSafeTransport_nil_option_element(t *testing.T) {
 	}
 }
 
-// Option application is order-independent: a resolver returning a private IP is
+// TransportOption application is order-independent: a resolver returning a private IP is
 // blocked whether WithResolver precedes or follows WithAllowedPorts.
 func TestSafeTransport_option_order_independent(t *testing.T) {
 	t.Parallel()
@@ -294,7 +296,7 @@ func TestSafeTransport_control_hook_fires(t *testing.T) {
 	t.Parallel()
 	allowAll := func(_ netip.Addr) bool { return true }
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
-	tr := SafeTransport(WithPolicy(allowAll), WithResolver(r), WithAllowedPorts())
+	tr := SafeTransport(WithAddressPolicy(allowAll), WithResolver(r), WithAnyPort())
 	dial := tr.DialContext
 	_, err := dial(context.Background(), "tcp", "evil.com:1")
 	if err != nil && strings.Contains(err.Error(), "not public") {
@@ -329,9 +331,25 @@ func TestWithAllowedPorts_allows_permitted(t *testing.T) {
 	}
 }
 
-func TestWithAllowedPorts_empty_allows_all(t *testing.T) {
+// An empty WithAllowedPorts() call must retain the 443-only default, never
+// silently widen to all ports (an accidentally-empty config slice must not
+// remove a security boundary).
+func TestWithAllowedPorts_empty_retains_default(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(WithAllowedPorts())
+	dial := tr.DialContext
+	_, err := dial(context.Background(), "tcp", "8.8.8.8:12345")
+	if err == nil {
+		t.Error("empty WithAllowedPorts() should retain the 443-only default")
+	}
+	if !strings.Contains(err.Error(), "not allowed") {
+		t.Errorf("expected port-not-allowed error, got: %v", err)
+	}
+}
+
+func TestWithAnyPort_allows_all(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport(WithAnyPort())
 	dial := tr.DialContext
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()

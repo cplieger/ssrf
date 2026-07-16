@@ -11,14 +11,17 @@ of invariants are load-bearing and easy to break without noticing.
 hardened `*http.Transport`. The public surface lives in a single file,
 `ssrf.go`:
 
-- `ValidateURL(raw)` — scheme must be `https` (configurable) and the host must
-  be public.
+- `ValidateURL(raw)` — scheme must be `https` and the host must be public.
 - `IsPublicHost(host)` / `IsPublicAddr(netip.Addr)` — globally-routable
   predicates.
-- `SafeTransport(opts...)` — the hardened transport (see invariants below).
-- `SafeRedirectPolicy` / `SafeRedirectPolicyWithSchemes` — wire as
+- `SafeTransport(opts ...TransportOption)` — the hardened transport (see
+  invariants below); configured via `WithAddressPolicy`, `WithDialer`,
+  `WithResolver`, `WithAllowedPorts`, and `WithAnyPort`.
+- `SafeRedirectPolicy` — HTTPS-only redirect policy; wire as
   `http.Client.CheckRedirect`; each redirect hop is re-validated.
-- `AllowedSchemes(opts...)` — extract the scheme set for redirect policies.
+- `URLPolicy` (`NewURLPolicy(schemes...)`, `.Validate(raw)`,
+  `.RedirectPolicy(next)`) — custom-scheme URL validation and redirect
+  policies; the zero value is HTTPS-only.
 
 Errors are `*ssrf.Error` with a machine-readable `Kind` (`KindBadScheme`,
 `KindNonPublicIP`, `KindBadPort`, …); consumers branch on it via `errors.As`.
