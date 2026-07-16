@@ -1,6 +1,6 @@
 # ssrf
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v2.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v3.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v3)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
@@ -13,12 +13,12 @@ Go library that validates URLs and IP addresses against SSRF attacks. Rejects pr
 
 ## Install
 
-`go get github.com/cplieger/ssrf/v2@latest`
+`go get github.com/cplieger/ssrf/v3@latest`
 
 ## Usage
 
 ```go
-import "github.com/cplieger/ssrf/v2"
+import "github.com/cplieger/ssrf/v3"
 
 // Validate a URL before fetching
 if err := ssrf.ValidateURL("https://example.com/data.json"); err != nil {
@@ -31,12 +31,15 @@ client := &http.Client{
     CheckRedirect: ssrf.SafeRedirectPolicy(nil),
 }
 
-// Allow HTTP + HTTPS with custom ports
+// Allow HTTP + HTTPS with custom ports: the URL policy gates schemes on
+// requests and redirect hops, the transport gates IPs and ports at dial time
+policy := ssrf.NewURLPolicy("https", "http")
 client = &http.Client{
-    Transport: ssrf.SafeTransport(
-        ssrf.WithAllowedSchemes("https", "http"),
-        ssrf.WithAllowedPorts(443, 80),
-    ),
+    Transport:     ssrf.SafeTransport(ssrf.WithAllowedPorts(443, 80)),
+    CheckRedirect: policy.RedirectPolicy(nil),
+}
+if err := policy.Validate("http://example.com/data.json"); err != nil {
+    log.Fatal(err)
 }
 
 // Programmatic error handling
@@ -63,8 +66,9 @@ if ssrf.IsPublicAddr(addr) {
 
 ### Types
 
-- `Option` — functional option for configuring `SafeTransport`
-- `Policy func(netip.Addr) bool` — allow/deny predicate for resolved IPs
+- `TransportOption` — functional option for configuring `SafeTransport`
+- `AddressPolicy func(netip.Addr) bool` — allow/deny predicate for resolved IPs
+- `URLPolicy` — scheme + public-host validation for requests and redirect hops; the zero value is HTTPS-only
 - `Resolver` — interface for DNS resolution (`LookupNetIP`)
 - `Error` — structured SSRF error with `Kind`, `Host`, `Msg`, and `Err` fields
 - `ErrorKind` — enum classifying SSRF validation failures
@@ -74,18 +78,19 @@ if ssrf.IsPublicAddr(addr) {
 - `ValidateURL(raw string) error` — checks scheme is HTTPS and host is public
 - `IsPublicHost(host string) bool` — returns whether a host/IP is globally routable
 - `IsPublicAddr(addr netip.Addr) bool` — returns whether an IP is globally routable
-- `SafeRedirectPolicy(next) func` — redirect policy that validates each hop
-- `SafeRedirectPolicyWithSchemes(schemes, next) func` — redirect policy with custom scheme set
-- `SafeTransport(opts ...Option) *http.Transport` — transport with DNS-rebinding-safe dial + Control hook
-- `AllowedSchemes(opts ...Option) map[string]struct{}` — extract scheme set for redirect policies
+- `SafeRedirectPolicy(next) func` — HTTPS-only redirect policy that validates each hop
+- `SafeTransport(opts ...TransportOption) *http.Transport` — transport with DNS-rebinding-safe dial + Control hook
+- `NewURLPolicy(schemes ...string) URLPolicy` — URL policy with a custom scheme set (empty = HTTPS-only)
+- `URLPolicy.Validate(raw string) error` — checks scheme is allowed and host is public
+- `URLPolicy.RedirectPolicy(next) func` — redirect policy validating each hop against the policy's schemes
 
-### Options
+### Transport options
 
-- `WithPolicy(Policy) Option` — inject a custom allow/deny IP predicate
-- `WithDialer(*net.Dialer) Option` — inject a custom net.Dialer
-- `WithResolver(Resolver) Option` — inject a custom DNS resolver
-- `WithAllowedPorts(...uint16) Option` — restrict outbound ports (default: 443 only)
-- `WithAllowedSchemes(...string) Option` — configure allowed URL schemes (default: https only)
+- `WithAddressPolicy(AddressPolicy) TransportOption` — inject a custom allow/deny IP predicate
+- `WithDialer(*net.Dialer) TransportOption` — inject a custom net.Dialer
+- `WithResolver(Resolver) TransportOption` — inject a custom DNS resolver
+- `WithAllowedPorts(...uint16) TransportOption` — restrict outbound ports (default: 443 only; passing none keeps the default)
+- `WithAnyPort() TransportOption` — explicitly remove the port restriction
 
 ### Structured Errors
 
@@ -155,7 +160,7 @@ The following features are intentionally NOT implemented:
 
 | Feature                     | Rationale                                                                                                    |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Custom allow/deny IP lists  | `WithPolicy(func(netip.Addr) bool)` already provides this                                                    |
+| Custom allow/deny IP lists  | `WithAddressPolicy(func(netip.Addr) bool)` already provides this                                             |
 | Hostname allowlist/denylist | Application-layer policy, not core SSRF defense                                                              |
 | Happy Eyeballs (RFC 8305)   | Security library prioritizes correctness over speed                                                          |
 | Response body size limit    | Use `io.LimitReader` at the application layer                                                                |

@@ -12,7 +12,7 @@
 // # Unsupported by design (SKIP list)
 //
 // The following features are intentionally NOT implemented:
-//   - Custom allow/deny IP lists: WithPolicy(func(netip.Addr) bool) already provides this.
+//   - Custom allow/deny IP lists: WithAddressPolicy(func(netip.Addr) bool) already provides this.
 //   - Hostname allowlist/denylist: Application-layer policy, not core SSRF defense.
 //   - Happy Eyeballs (RFC 8305): Security library prioritizes correctness over speed.
 //   - Response body size limit: Use io.LimitReader at the application layer.
@@ -100,10 +100,10 @@ func ssrfErr(kind ErrorKind, host, msg string, err error) *Error {
 	return &Error{Kind: kind, Host: host, Msg: msg, Err: err}
 }
 
-// Policy controls whether a resolved IP address is allowed or denied.
+// AddressPolicy controls whether a resolved IP address is allowed or denied.
 // Return true to allow the connection, false to block it.
 // The default policy (used when none is provided) is [IsPublicAddr].
-type Policy func(addr netip.Addr) bool
+type AddressPolicy func(addr netip.Addr) bool
 
 // Resolver abstracts DNS resolution for testing and custom environments.
 // The standard library's [net.Resolver] satisfies this interface.
@@ -111,22 +111,21 @@ type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// Option configures [SafeTransport].
-type Option func(*transportConfig)
+// TransportOption configures [SafeTransport].
+type TransportOption func(*transportConfig)
 
 type transportConfig struct {
-	policy         Policy
+	policy         AddressPolicy
 	dialer         *net.Dialer
 	resolver       Resolver
 	allowedPorts   map[uint16]struct{}
-	schemes        map[string]struct{}
 	policyIsCustom bool
 }
 
-// WithPolicy sets a custom allow/deny policy for resolved IP addresses.
+// WithAddressPolicy sets a custom allow/deny policy for resolved IP addresses.
 // The policy is called after unmapping IPv4-mapped IPv6 addresses.
 // A nil policy is ignored (the default [IsPublicAddr] policy is retained).
-func WithPolicy(p Policy) Option {
+func WithAddressPolicy(p AddressPolicy) TransportOption {
 	return func(c *transportConfig) {
 		if p != nil {
 			c.policy = p
@@ -143,7 +142,7 @@ func WithPolicy(p Policy) Option {
 // The dialer's Control hook is always overwritten with the SSRF socket-time
 // IP re-validation hook and cannot be supplied by the caller; this is the
 // defense-in-depth layer against DNS rebinding and must not be bypassed.
-func WithDialer(d *net.Dialer) Option {
+func WithDialer(d *net.Dialer) TransportOption {
 	return func(c *transportConfig) {
 		if d != nil {
 			c.dialer = d
@@ -154,7 +153,7 @@ func WithDialer(d *net.Dialer) Option {
 // WithResolver sets a custom DNS resolver for hostname resolution.
 // Useful for testing or environments with custom resolvers (e.g., CoreDNS sidecar).
 // A nil resolver is ignored (net.DefaultResolver is retained).
-func WithResolver(r Resolver) Option {
+func WithResolver(r Resolver) TransportOption {
 	return func(c *transportConfig) {
 		if r != nil {
 			c.resolver = r
@@ -163,19 +162,12 @@ func WithResolver(r Resolver) Option {
 }
 
 // WithAllowedPorts sets the ports that outbound connections may target.
-// By default only port 443 is allowed (matching HTTPS-only posture).
-// Pass an empty slice to allow all ports. Mirrors doyensec/safeurl AllowedPorts.
-//
-// FAIL-OPEN asymmetry: an empty call here WIDENS to all ports -- the opposite
-// of [WithAllowedSchemes] (empty = no-op, HTTPS-only retained) and of a non-nil
-// empty [SafeRedirectPolicyWithSchemes] map (fail-closed, blocks every scheme).
-// Guard against an accidentally-empty config slice at the call site:
-// WithAllowedPorts(cfgPorts...) silently disables port restriction when
-// cfgPorts is empty, rather than retaining the 443-only default.
-func WithAllowedPorts(ports ...uint16) Option {
+// By default only port 443 is allowed (matching the HTTPS-only posture).
+// Passing no ports retains that default; use [WithAnyPort] to remove the
+// restriction explicitly. Mirrors doyensec/safeurl AllowedPorts.
+func WithAllowedPorts(ports ...uint16) TransportOption {
 	return func(c *transportConfig) {
 		if len(ports) == 0 {
-			c.allowedPorts = nil // nil = all ports allowed
 			return
 		}
 		m := make(map[uint16]struct{}, len(ports))
@@ -186,29 +178,38 @@ func WithAllowedPorts(ports ...uint16) Option {
 	}
 }
 
-// WithAllowedSchemes sets the URL schemes used by [AllowedSchemes] and
-// [SafeRedirectPolicyWithSchemes]. (ValidateURL itself is HTTPS-only.)
-// By default only "https" is allowed. Mirrors doyensec/safeurl AllowedSchemes.
-// Schemes are compared case-insensitively.
-// Passing no schemes is a no-op: unlike WithAllowedPorts, an empty call does
-// NOT widen the set to "all schemes" -- the HTTPS-only default is retained,
-// since allowing arbitrary schemes would defeat the SSRF posture.
-//
-// NOTE: this option has NO effect when passed to [SafeTransport] -- the
-// transport gates at the IP/port layer only and never inspects the scheme
-// set. Use it with [AllowedSchemes] (feed the result into
-// [SafeRedirectPolicyWithSchemes]) to gate redirect-hop schemes.
-func WithAllowedSchemes(schemes ...string) Option {
+// WithAnyPort removes the outbound port restriction. Public-address policy
+// and both DNS-rebinding checks remain active.
+func WithAnyPort() TransportOption {
 	return func(c *transportConfig) {
-		if len(schemes) == 0 {
-			return
-		}
-		m := make(map[string]struct{}, len(schemes))
-		for _, s := range schemes {
-			m[strings.ToLower(s)] = struct{}{}
-		}
-		c.schemes = m
+		c.allowedPorts = nil
 	}
+}
+
+// URLPolicy validates URL schemes and hosts before requests or redirect hops.
+// The zero value allows HTTPS only, so it is ready for use without a constructor.
+// A URLPolicy performs no DNS lookup; pair it with [SafeTransport] when making
+// requests so resolved and connected addresses are validated at the dial boundary.
+type URLPolicy struct {
+	allowedSchemes map[string]struct{}
+}
+
+// NewURLPolicy returns a URL policy allowing the given schemes. With no
+// schemes it returns the HTTPS-only default. Scheme matching is case-insensitive.
+func NewURLPolicy(schemes ...string) URLPolicy {
+	if len(schemes) == 0 {
+		return URLPolicy{}
+	}
+	allowed := make(map[string]struct{}, len(schemes))
+	for _, scheme := range schemes {
+		allowed[strings.ToLower(scheme)] = struct{}{}
+	}
+	return URLPolicy{allowedSchemes: allowed}
+}
+
+// Validate checks that raw uses an allowed scheme and points to a public host.
+func (p URLPolicy) Validate(raw string) error {
+	return validateURLWithSchemes(raw, p.allowedSchemes)
 }
 
 // ValidateURL checks that a URL uses HTTPS and points to a public host.
@@ -444,7 +445,8 @@ var reasonLabels = map[ErrorKind]string{
 // emitted by the host-validation path ([validateURLWithSchemes], via
 // [ValidateURL]), the redirect policy, and the policy-denial branch of the
 // socket-level paths ([safeControl], [safeDialContext]) -- which pass
-// KindNonPublicIP by default or KindPolicyDenied under a custom [WithPolicy].
+// KindNonPublicIP by default or KindPolicyDenied under a custom
+// [WithAddressPolicy].
 // The socket-level paths' structural rejections and port checks
 // (checkAllowedPort) intentionally emit their own finer-grained inline labels
 // (e.g. "no_ips_resolved", "disallowed_network", "unparseable_ip",
@@ -619,23 +621,19 @@ func teredoServerIPv4(b [16]byte) netip.Addr {
 }
 
 // SafeRedirectPolicy returns an http.Client CheckRedirect function that
-// validates each redirect target URL against SSRF rules.
+// validates each redirect target URL against SSRF rules (HTTPS-only).
+// For custom schemes, use [URLPolicy.RedirectPolicy].
 func SafeRedirectPolicy(
 	next func(req *http.Request, via []*http.Request) error,
 ) func(req *http.Request, via []*http.Request) error {
-	return SafeRedirectPolicyWithSchemes(nil, next)
+	return URLPolicy{}.RedirectPolicy(next)
 }
 
-// SafeRedirectPolicyWithSchemes returns a redirect policy that validates
-// against the given allowed schemes (for use with [WithAllowedSchemes]).
-//
-// Scheme-set semantics: a nil schemes map means HTTPS-only; a non-nil but
-// empty map blocks every scheme (fail-closed) and rejects all redirects.
-// Source a safe non-empty set from [AllowedSchemes] rather than building
-// the map inline -- unlike WithAllowedSchemes, an empty map here is not
-// widened to the HTTPS default.
-func SafeRedirectPolicyWithSchemes(
-	schemes map[string]struct{},
+// RedirectPolicy returns an http.Client CheckRedirect function that validates
+// each redirect target URL against this policy's allowed schemes and the SSRF
+// host rules. next, if non-nil, is called after validation passes, so callers
+// can chain their own redirect logic.
+func (p URLPolicy) RedirectPolicy(
 	next func(req *http.Request, via []*http.Request) error,
 ) func(req *http.Request, via []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
@@ -644,7 +642,7 @@ func SafeRedirectPolicyWithSchemes(
 				"reason", "too_many_redirects", "hops", len(via))
 			return ssrfErr(KindTooManyRedirects, "", fmt.Sprintf("stopped after %d redirects", maxRedirects), nil)
 		}
-		if verr := classifyURLWithSchemes(req.URL.String(), schemes); verr != nil {
+		if verr := classifyURLWithSchemes(req.URL.String(), p.allowedSchemes); verr != nil {
 			// Use the silent classification core so only "ssrf redirect
 			// blocked" is emitted (not a duplicate inner "ssrf blocked"). The
 			// inner Kind is propagated so a caller inspecting
@@ -691,10 +689,10 @@ func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage str
 //
 // denyKind is an optional override for the ErrorKind emitted when policy
 // rejects the connected IP; it defaults to KindNonPublicIP. SafeTransport
-// passes KindPolicyDenied when a custom WithPolicy is in effect, so a
+// passes KindPolicyDenied when a custom WithAddressPolicy is in effect, so a
 // custom-policy denial surfaces the documented KindPolicyDenied. Structural
 // rejections (disallowed network, unparseable IP) always use KindNonPublicIP.
-func safeControl(policy Policy, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(network, address string, c syscall.RawConn) error {
+func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(network, address string, c syscall.RawConn) error {
 	policyDenyKind := KindNonPublicIP
 	if len(denyKind) > 0 {
 		policyDenyKind = denyKind[0]
@@ -739,8 +737,8 @@ func safeControl(policy Policy, allowedPorts map[uint16]struct{}, denyKind ...Er
 // denyKind is an optional override for the ErrorKind emitted when policy
 // rejects a resolved IP; it defaults to KindNonPublicIP and is forwarded to
 // safeControl so both validation layers report the same kind. SafeTransport
-// passes KindPolicyDenied when a custom WithPolicy is in effect.
-func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// passes KindPolicyDenied when a custom WithAddressPolicy is in effect.
+func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	policyDenyKind := KindNonPublicIP
 	if len(denyKind) > 0 {
 		policyDenyKind = denyKind[0]
@@ -780,7 +778,7 @@ func safeDialContext(dialer *net.Dialer, policy Policy, resolver Resolver, allow
 // one. It returns a freshly allocated slice (never aliasing the resolver's
 // cached return value) so the caller can cap dial attempts without affecting
 // which IPs are validated.
-func resolveAndValidate(ctx context.Context, resolver Resolver, policy Policy, host string, policyDenyKind ErrorKind) ([]netip.Addr, error) {
+func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPolicy, host string, policyDenyKind ErrorKind) ([]netip.Addr, error) {
 	dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
 	cancel()
@@ -843,9 +841,9 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, po
 }
 
 // SafeTransport returns an *http.Transport hardened against SSRF and
-// DNS rebinding. Use [WithPolicy], [WithDialer], [WithResolver],
-// [WithAllowedPorts], and [WithAllowedSchemes] to customize.
-func SafeTransport(opts ...Option) *http.Transport {
+// DNS rebinding. Use [WithAddressPolicy], [WithDialer], [WithResolver],
+// [WithAllowedPorts], and [WithAnyPort] to customize.
+func SafeTransport(opts ...TransportOption) *http.Transport {
 	cfg := transportConfig{
 		policy: isPublicAddr,
 		dialer: &net.Dialer{
@@ -854,16 +852,15 @@ func SafeTransport(opts ...Option) *http.Transport {
 		},
 		resolver:     net.DefaultResolver,
 		allowedPorts: map[uint16]struct{}{443: {}},
-		schemes:      map[string]struct{}{schemeHTTPS: {}},
 	}
 	for _, o := range opts {
 		if o != nil {
 			o(&cfg)
 		}
 	}
-	// A custom WithPolicy denial reports KindPolicyDenied (the documented
-	// "custom policy rejected the IP" kind); the default isPublicAddr policy
-	// keeps reporting KindNonPublicIP.
+	// A custom WithAddressPolicy denial reports KindPolicyDenied (the
+	// documented "custom policy rejected the IP" kind); the default
+	// isPublicAddr policy keeps reporting KindNonPublicIP.
 	denyKind := KindNonPublicIP
 	if cfg.policyIsCustom {
 		denyKind = KindPolicyDenied
@@ -878,19 +875,4 @@ func SafeTransport(opts ...Option) *http.Transport {
 		MaxIdleConnsPerHost:   4,
 		ForceAttemptHTTP2:     true,
 	}
-}
-
-// AllowedSchemes returns the scheme set from the transport config, for use
-// with [SafeRedirectPolicyWithSchemes]. The default (no options) is the
-// HTTPS-only set {"https"}; the result is always non-nil.
-func AllowedSchemes(opts ...Option) map[string]struct{} {
-	cfg := transportConfig{
-		schemes: map[string]struct{}{schemeHTTPS: {}},
-	}
-	for _, o := range opts {
-		if o != nil {
-			o(&cfg)
-		}
-	}
-	return cfg.schemes
 }

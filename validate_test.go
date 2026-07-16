@@ -278,12 +278,11 @@ func TestIsNumericLabel(t *testing.T) {
 	}
 }
 
-// --- Scheme allowlist (validateURLWithSchemes) ---
+// --- Scheme allowlist (URLPolicy.Validate) ---
 
-func TestWithAllowedSchemes_rejects_disallowed(t *testing.T) {
+func TestURLPolicyValidate_rejects_disallowed(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}}
-	err := validateURLWithSchemes("http://example.com/f", schemes)
+	err := NewURLPolicy("https").Validate("http://example.com/f")
 	if err == nil {
 		t.Error("expected error for http when only https allowed")
 	}
@@ -293,31 +292,51 @@ func TestWithAllowedSchemes_rejects_disallowed(t *testing.T) {
 	}
 }
 
-func TestWithAllowedSchemes_allows_http_when_configured(t *testing.T) {
+func TestURLPolicyValidate_allows_http_when_configured(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}, "http": {}}
-	err := validateURLWithSchemes("http://example.com/f", schemes)
+	err := NewURLPolicy("https", "http").Validate("http://example.com/f")
 	if err != nil {
 		t.Errorf("http should be allowed, got: %v", err)
 	}
 }
 
-func TestWithAllowedSchemes_case_insensitive(t *testing.T) {
+func TestURLPolicyValidate_case_insensitive(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}}
-	err := validateURLWithSchemes("HTTPS://example.com/f", schemes)
+	err := NewURLPolicy("https").Validate("HTTPS://example.com/f")
 	if err != nil {
 		t.Errorf("HTTPS (uppercase) should match, got: %v", err)
 	}
 }
 
-// validateURLWithSchemes matches schemes case-insensitively: disallowed schemes
+// NewURLPolicy lowercases constructor arguments, so an uppercase scheme
+// configures the same policy as its lowercase form.
+func TestNewURLPolicy_folds_constructor_schemes(t *testing.T) {
+	t.Parallel()
+	err := NewURLPolicy("HTTPS", "HTTP").Validate("http://example.com/f")
+	if err != nil {
+		t.Errorf("constructor scheme case should be folded, got: %v", err)
+	}
+}
+
+// The zero-value URLPolicy validates HTTPS-only, matching ValidateURL.
+func TestURLPolicy_zero_value_validates_https_only(t *testing.T) {
+	t.Parallel()
+	var policy URLPolicy
+	if err := policy.Validate("http://example.com/f"); err == nil {
+		t.Error("zero-value URLPolicy should block http")
+	}
+	if err := policy.Validate("https://example.com/f"); err != nil {
+		t.Errorf("zero-value URLPolicy should allow https, got: %v", err)
+	}
+}
+
+// URLPolicy.Validate matches schemes case-insensitively: disallowed schemes
 // are blocked in any case, and allowed schemes pass in any case. Folds the
 // red-team scheme-casing rounds into one table; "dict" exercises a gopher-class
 // SSRF scheme that must stay blocked under an http/https allowlist.
-func TestValidateURLWithSchemes_scheme_casefolding(t *testing.T) {
+func TestURLPolicyValidate_scheme_casefolding(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}, "http": {}}
+	policy := NewURLPolicy("https", "http")
 	blocked := []string{
 		"FTP://example.com/f",
 		"Ftp://example.com/f",
@@ -330,7 +349,7 @@ func TestValidateURLWithSchemes_scheme_casefolding(t *testing.T) {
 		"dict://evil.com:11211/stat",
 	}
 	for _, u := range blocked {
-		if err := validateURLWithSchemes(u, schemes); err == nil {
+		if err := policy.Validate(u); err == nil {
 			t.Errorf("scheme %q passed validation, want blocked", u)
 		}
 	}
@@ -341,7 +360,7 @@ func TestValidateURLWithSchemes_scheme_casefolding(t *testing.T) {
 		"Http://example.com/ok",
 	}
 	for _, u := range allowed {
-		if err := validateURLWithSchemes(u, schemes); err != nil {
+		if err := policy.Validate(u); err != nil {
 			t.Errorf("scheme %q should be allowed, got: %v", u, err)
 		}
 	}
@@ -349,9 +368,9 @@ func TestValidateURLWithSchemes_scheme_casefolding(t *testing.T) {
 
 // Under an https-only allowlist, every case variant of a non-https scheme must
 // be rejected (the comparison lowercases the scheme before the set lookup).
-func TestValidateURLWithSchemes_case_variants_blocked_https_only(t *testing.T) {
+func TestURLPolicyValidate_case_variants_blocked_https_only(t *testing.T) {
 	t.Parallel()
-	schemes := map[string]struct{}{"https": {}}
+	policy := NewURLPolicy("https")
 	cases := []string{
 		"HTTP://example.com/f",
 		"Http://example.com/f",
@@ -359,7 +378,7 @@ func TestValidateURLWithSchemes_case_variants_blocked_https_only(t *testing.T) {
 		"FTP://example.com/f",
 	}
 	for _, u := range cases {
-		if err := validateURLWithSchemes(u, schemes); err == nil {
+		if err := policy.Validate(u); err == nil {
 			t.Errorf("scheme case %q passed, want blocked under https-only", u)
 		}
 	}
