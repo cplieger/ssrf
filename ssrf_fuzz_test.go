@@ -360,6 +360,15 @@ func FuzzIsPublicHost(f *testing.F) {
 		hostOk := IsPublicHost(host)
 		if !hostOk {
 			testURL := "https://" + host + "/"
+			// The oracle only holds when the URL actually carries host as its
+			// authority. Raw fuzz input containing URL delimiters ('#', '?',
+			// '/', '@', ...) re-parses into a DIFFERENT (often empty) host —
+			// e.g. "a.A# 0" puts "# 0" in the fragment — so IsPublicHost and
+			// ValidateURL would be judging different hosts and a mismatch is
+			// not a bypass (fuzz finding 453ea43caa7c18fc).
+			if u, err := url.Parse(testURL); err != nil || u.Hostname() != host {
+				return
+			}
 			if err := ValidateURL(testURL); err == nil {
 				t.Fatalf("IsPublicHost rejected %q but ValidateURL accepted %q", host, testURL)
 			}
