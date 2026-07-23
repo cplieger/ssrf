@@ -367,6 +367,14 @@ func hostValidationError(host string) *Error {
 // (dotted-octal, dotted-hex, or oversized inet_aton form) that netip.ParseAddr
 // rejects but a libc resolver would accept. Dotless forms (fewer than two
 // labels) are left to the bare-hostname gate.
+//
+// The sibling webhttp library carries its own numeric-IPv4 heuristic (inside
+// CanonicalHost's hostname validation) with a deliberately DIFFERENT reject
+// set: webhttp keys an exact-match inbound Host allowlist with no resolution,
+// so it accepts dotted-hex forms like "0x7f.0.0.1" as plain textual labels,
+// while this outbound classifier must reject them because they reach a
+// resolver. The two must NOT be unified — see CanonicalHost's doc for the
+// inbound rationale.
 func looksLikeNumericIPv4(host string) bool {
 	labels := strings.Split(host, ".")
 	if len(labels) < 2 {
