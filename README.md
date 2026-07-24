@@ -9,7 +9,7 @@
 
 > URL validation to prevent server-side request forgery (SSRF)
 
-Go library that validates URLs and IP addresses against SSRF attacks. Rejects private/loopback/link-local/CGNAT addresses, enforces HTTPS (configurable), detects IPv6 transition mechanism bypasses (6to4, NAT64, Teredo, IPv4-compatible), and provides a hardened HTTP transport with DNS rebinding protection via both resolve-once semantics and a `net.Dialer.Control` hook for defense-in-depth. Standard library only (test-only dependency on pgregory.net/rapid for property-based testing).
+Go library that validates URLs and IP addresses against SSRF attacks. Rejects private, loopback, link-local, and CGNAT addresses, enforces HTTPS (configurable), and detects IPv6 transition-mechanism bypasses (6to4, NAT64, Teredo, IPv4-compatible). Ships a hardened HTTP transport whose DNS-rebinding defense validates twice: once at resolution and again via a `net.Dialer.Control` hook at socket creation. Standard library only (test-only dependency on pgregory.net/rapid for property-based testing).
 
 ## Install
 
@@ -66,31 +66,31 @@ if ssrf.IsPublicAddr(addr) {
 
 ### Types
 
-- `TransportOption` — functional option for configuring `SafeTransport`
-- `AddressPolicy func(netip.Addr) bool` — allow/deny predicate for resolved IPs
-- `URLPolicy` — scheme + public-host validation for requests and redirect hops; the zero value is HTTPS-only
-- `Resolver` — interface for DNS resolution (`LookupNetIP`)
-- `Error` — structured SSRF error with `Kind`, `Host`, `Msg`, and `Err` fields
-- `ErrorKind` — enum classifying SSRF validation failures
+- `TransportOption`: functional option for configuring `SafeTransport`
+- `AddressPolicy func(netip.Addr) bool`: allow/deny predicate for resolved IPs
+- `URLPolicy`: scheme + public-host validation for requests and redirect hops; the zero value is HTTPS-only
+- `Resolver`: interface for DNS resolution (`LookupNetIP`)
+- `Error`: structured SSRF error with `Kind`, `Host`, `Msg`, and `Err` fields
+- `ErrorKind`: enum classifying SSRF validation failures
 
 ### Functions
 
-- `ValidateURL(raw string) error` — checks scheme is HTTPS and host is public
-- `IsPublicHost(host string) bool` — returns whether a host/IP is globally routable
-- `IsPublicAddr(addr netip.Addr) bool` — returns whether an IP is globally routable
-- `SafeRedirectPolicy(next) func` — HTTPS-only redirect policy that validates each hop
-- `SafeTransport(opts ...TransportOption) *http.Transport` — transport with DNS-rebinding-safe dial + Control hook
-- `NewURLPolicy(schemes ...string) URLPolicy` — URL policy with a custom scheme set (empty = HTTPS-only)
-- `URLPolicy.Validate(raw string) error` — checks scheme is allowed and host is public
-- `URLPolicy.RedirectPolicy(next) func` — redirect policy validating each hop against the policy's schemes
+- `ValidateURL(raw string) error`: checks scheme is HTTPS and host is public
+- `IsPublicHost(host string) bool`: returns whether a host/IP is globally routable
+- `IsPublicAddr(addr netip.Addr) bool`: returns whether an IP is globally routable
+- `SafeRedirectPolicy(next) func`: HTTPS-only redirect policy that validates each hop
+- `SafeTransport(opts ...TransportOption) *http.Transport`: transport with DNS-rebinding-safe dial + Control hook
+- `NewURLPolicy(schemes ...string) URLPolicy`: URL policy with a custom scheme set (empty = HTTPS-only)
+- `URLPolicy.Validate(raw string) error`: checks scheme is allowed and host is public
+- `URLPolicy.RedirectPolicy(next) func`: redirect policy validating each hop against the policy's schemes
 
 ### Transport options
 
-- `WithAddressPolicy(AddressPolicy) TransportOption` — inject a custom allow/deny IP predicate
-- `WithDialer(*net.Dialer) TransportOption` — inject a custom net.Dialer
-- `WithResolver(Resolver) TransportOption` — inject a custom DNS resolver
-- `WithAllowedPorts(...uint16) TransportOption` — restrict outbound ports (default: 443 only; passing none keeps the default)
-- `WithAnyPort() TransportOption` — explicitly remove the port restriction
+- `WithAddressPolicy(AddressPolicy) TransportOption`: inject a custom allow/deny IP predicate
+- `WithDialer(*net.Dialer) TransportOption`: inject a custom net.Dialer
+- `WithResolver(Resolver) TransportOption`: inject a custom DNS resolver
+- `WithAllowedPorts(...uint16) TransportOption`: restrict outbound ports (default: 443 only; passing none keeps the default)
+- `WithAnyPort() TransportOption`: explicitly remove the port restriction
 
 ### Structured Errors
 
@@ -117,8 +117,8 @@ on a `CheckRedirect` error reports the real reason rather than a blanket value.
 
 The transport uses **two layers** of IP validation:
 
-1. **Resolve-once** — DNS is resolved once, all IPs validated, then the dialer connects to the literal IP (prevents DNS rebinding via TOCTOU).
-2. **`net.Dialer.Control` hook** — validates the actually-connected IP at socket creation time, after the OS has resolved the address but before the TCP handshake. This mirrors the canonical pattern from [doyensec/safeurl](https://github.com/doyensec/safeurl), [Stripe smokescreen](https://github.com/stripe/smokescreen), and [mccutchen/safedialer](https://github.com/mccutchen/safedialer).
+1. **Resolve-once.** DNS is resolved once, all IPs validated, then the dialer connects to the literal IP (prevents DNS rebinding via TOCTOU).
+2. **`net.Dialer.Control` hook.** Validates the actually-connected IP at socket creation time, after the OS has resolved the address but before the TCP handshake. This mirrors the canonical pattern from [doyensec/safeurl](https://github.com/doyensec/safeurl), [Stripe smokescreen](https://github.com/stripe/smokescreen), and [mccutchen/safedialer](https://github.com/mccutchen/safedialer).
 
 ### Logging
 
@@ -150,8 +150,8 @@ IPv6 transition mechanisms (embedded IPv4 extracted and re-validated):
 
 - `2002::/16` (6to4, RFC 3056)
 - `64:ff9b::/96` (NAT64 well-known, RFC 6052)
-- `64:ff9b:1::/48` (NAT64 local, RFC 8215 — blocked outright)
-- `2001::/32` (Teredo, RFC 4380 — client IPv4 XOR-inverted in bits 96–127)
+- `64:ff9b:1::/48` (NAT64 local, RFC 8215; blocked outright)
+- `2001::/32` (Teredo, RFC 4380; embedded client and server IPv4s validated)
 - `::/96` (deprecated IPv4-compatible)
 
 ## Unsupported by Design
@@ -170,7 +170,12 @@ The following features are intentionally NOT implemented:
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+See the [security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) for vulnerability reporting.
+
+## Contributing
+
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+conventions and how to run the checks locally.
 
 ## Disclaimer
 
@@ -180,4 +185,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).
