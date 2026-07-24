@@ -11,16 +11,16 @@ of invariants are load-bearing and easy to break without noticing.
 hardened `*http.Transport`. The public surface lives in a single file,
 `ssrf.go`:
 
-- `ValidateURL(raw)` — scheme must be `https` and the host must be public.
-- `IsPublicHost(host)` / `IsPublicAddr(netip.Addr)` — globally-routable
+- `ValidateURL(raw)`: scheme must be `https` and the host must be public.
+- `IsPublicHost(host)` / `IsPublicAddr(netip.Addr)`: globally-routable
   predicates.
-- `SafeTransport(opts ...TransportOption)` — the hardened transport (see
+- `SafeTransport(opts ...TransportOption)`: the hardened transport (see
   invariants below); configured via `WithAddressPolicy`, `WithDialer`,
   `WithResolver`, `WithAllowedPorts`, and `WithAnyPort`.
-- `SafeRedirectPolicy` — HTTPS-only redirect policy; wire as
+- `SafeRedirectPolicy`: HTTPS-only redirect policy; wire as
   `http.Client.CheckRedirect`; each redirect hop is re-validated.
 - `URLPolicy` (`NewURLPolicy(schemes...)`, `.Validate(raw)`,
-  `.RedirectPolicy(next)`) — custom-scheme URL validation and redirect
+  `.RedirectPolicy(next)`): custom-scheme URL validation and redirect
   policies; the zero value is HTTPS-only.
 
 Errors are `*ssrf.Error` with a machine-readable `Kind` (`KindBadScheme`,
@@ -34,8 +34,8 @@ returns `KindTooManyRedirects`.
 These are the parts a change can silently break. Treat them as contracts.
 
 - **Two-layer DNS-rebinding defense.** `safeDialContext` resolves a hostname
-  **once**, validates every returned IP, then dials the literal IP — and it
-  also installs a `net.Dialer.Control` hook (`safeControl`) that re-validates
+  **once**, validates every returned IP, then dials the literal IP. It also
+  installs a `net.Dialer.Control` hook (`safeControl`) that re-validates
   the actually-connected IP at socket creation, after the OS resolves but
   before the TCP handshake. Never collapse these two layers into one; the
   pairing is what defeats TOCTOU rebinding. Two implementation details keep it
@@ -62,9 +62,10 @@ These are the parts a change can silently break. Treat them as contracts.
 - **`isPublicAddr` unmaps first.** IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
   unmapped before any prefix check, so IPv4 block ranges still apply.
 - **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
-  (`2002::/16`), NAT64 well-known (`64:ff9b::/96`), Teredo (`2001::/32`, client
-  IPv4 XOR-inverted in bytes 12–15), and IPv4-compatible (`::/96`) all extract
-  the embedded IPv4 and recurse through `isPublicAddr`. NAT64-local
+  (`2002::/16`), NAT64 well-known (`64:ff9b::/96`), Teredo (`2001::/32`; server
+  IPv4 in bytes 4–7 and client IPv4 XOR-inverted in bytes 12–15, both
+  validated), and IPv4-compatible (`::/96`) all extract the embedded IPv4 and
+  recurse through `isPublicAddr`. NAT64-local
   (`64:ff9b:1::/48`) is blocked outright rather than unwrapped, because its
   embedding offset differs from the well-known prefix.
 - **The blocked-range list and the "Unsupported by Design" table in the
@@ -98,8 +99,8 @@ golangci-lint fmt
 
 ## Property and fuzz tests
 
-Correctness here is enforced by property-based and fuzz tests, not just
-examples — extend them when you touch validation logic.
+Property-based and fuzz tests enforce correctness here; extend them when you
+touch validation logic.
 
 - Property test (`pgregory.net/rapid`): `TestValidateURL_properties` in
   `ssrf_prop_test.go`. Runs as part of `go test ./...`.
@@ -137,5 +138,5 @@ ensure `go test ./...` and `golangci-lint run` pass, and open a PR.
 By participating you agree to the
 [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
 Report vulnerabilities through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md);
 never in a public issue.
