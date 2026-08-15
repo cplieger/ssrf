@@ -98,7 +98,7 @@ func TestSafeTransport_defaultDialerKeepAlive(t *testing.T) {
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
 	tr := SafeTransport(WithResolver(r), WithAddressPolicy(allowAll), WithAnyPort())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	conn, err := tr.DialContext(ctx, "tcp", net.JoinHostPort("keepalive.invalid", portStr))
