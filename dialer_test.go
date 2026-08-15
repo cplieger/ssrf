@@ -49,7 +49,7 @@ func loopbackIPs(n int) []netip.Addr {
 func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 	t.Parallel()
 	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
-	_, err := dial(context.Background(), "tcp", "127.0.0.1:443")
+	_, err := dial(t.Context(), "tcp", "127.0.0.1:443")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for loopback IP")
 	}
@@ -58,7 +58,7 @@ func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 func TestSafeDialContext_blocks_private_range(t *testing.T) {
 	t.Parallel()
 	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
-	_, err := dial(context.Background(), "tcp", "192.168.1.1:443")
+	_, err := dial(t.Context(), "tcp", "192.168.1.1:443")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for private IP")
 	}
@@ -67,7 +67,7 @@ func TestSafeDialContext_blocks_private_range(t *testing.T) {
 func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 	t.Parallel()
 	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
-	_, err := dial(context.Background(), "tcp", "no-port")
+	_, err := dial(t.Context(), "tcp", "no-port")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for invalid address")
 	}
@@ -80,7 +80,7 @@ func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 func TestSafeDialContext_dns_lookup_error_is_wrapped(t *testing.T) {
 	t.Parallel()
 	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
 	conn, err := dial(ctx, "tcp", "invalid-host-does-not-exist-xyz.invalid:443")
@@ -103,7 +103,7 @@ func TestSafeDialContext_empty_resolution_blocked(t *testing.T) {
 	t.Parallel()
 	r := &mockResolver{ips: nil}
 	tr := SafeTransport(WithResolver(r))
-	_, err := tr.DialContext(context.Background(), "tcp", "evil.com:443")
+	_, err := tr.DialContext(t.Context(), "tcp", "evil.com:443")
 	if err == nil {
 		t.Fatal("DialContext() = nil, want error when resolver returns no IPs")
 	}
@@ -119,6 +119,8 @@ func TestSafeDialContext_empty_resolution_blocked(t *testing.T) {
 func TestSafeDialContext_context_cancelled_before_dial(t *testing.T) {
 	t.Parallel()
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}
+	// Not t.Context(): this context is deliberately pre-cancelled to drive the
+	// dial's context-cancelled error path.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, r, nil)
@@ -142,7 +144,7 @@ func TestSafeDialContext_disallowed_port_kind(t *testing.T) {
 		isPublicAddr, net.DefaultResolver,
 		map[uint16]struct{}{443: {}},
 	)
-	_, err := dial(context.Background(), "tcp", "8.8.8.8:80")
+	_, err := dial(t.Context(), "tcp", "8.8.8.8:80")
 	if err == nil {
 		t.Fatal("expected port error")
 	}
@@ -166,7 +168,7 @@ func TestSafeDialContext_gives_dns_lookup_a_generous_budget(t *testing.T) {
 	r := budgetResolver{minBudget: time.Second, ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
 	dial := safeDialContext(&net.Dialer{Timeout: 250 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}})
 
-	_, err := dial(context.Background(), "tcp", "slow-dns.example:1")
+	_, err := dial(t.Context(), "tcp", "slow-dns.example:1")
 
 	if err == nil {
 		t.Fatalf("dial(slow-dns.example:1) = nil err, want a dial failure on loopback:1")
@@ -205,7 +207,7 @@ func TestSafeDialContext_caps_dial_attempts_only_above_maxDialIPs(t *testing.T) 
 			r := &mockResolver{ips: loopbackIPs(tc.resolved)}
 			dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}})
 
-			_, _ = dial(context.Background(), "tcp", "many.example:1")
+			_, _ = dial(t.Context(), "tcp", "many.example:1")
 
 			gotCap := strings.Contains(buf.String(), "ssrf dial capped")
 			if gotCap != tc.wantCap {
@@ -411,7 +413,7 @@ func TestRegression_dial_invalid_port_rejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := dial(context.Background(), "tcp", tc.addr)
+			_, err := dial(t.Context(), "tcp", tc.addr)
 			if err == nil {
 				t.Errorf("dial(%q) = nil, want error for invalid port", tc.addr)
 			}
@@ -459,7 +461,7 @@ func TestRegression_mapped_all_ranges_dial(t *testing.T) {
 			r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr(tc.ip)}}
 			tr := SafeTransport(WithResolver(r), WithAllowedPorts(443))
 			dial := tr.DialContext
-			_, err := dial(context.Background(), "tcp", "evil.com:443")
+			_, err := dial(t.Context(), "tcp", "evil.com:443")
 			if err == nil {
 				t.Errorf("dial did not block resolver returning %s", tc.ip)
 			}
@@ -477,7 +479,7 @@ func TestRegression_resolver_mixed_ips_blocked(t *testing.T) {
 	}}
 	tr := SafeTransport(WithResolver(r), WithAllowedPorts(443))
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "evil.com:443")
+	_, err := dial(t.Context(), "tcp", "evil.com:443")
 	if err == nil {
 		t.Error("resolver returning mixed public+private IPs should be blocked")
 	}
@@ -495,7 +497,7 @@ func TestRegression_concurrent_dial_no_race(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 50 {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
 			_, _ = dial(ctx, "tcp", "example.com:443")
 		})
@@ -536,7 +538,7 @@ func TestRegression_dialer_controlcontext_cleared(t *testing.T) {
 
 	// Loopback:9 fails to connect (no service), but both Control hooks fire
 	// at socket creation before the connect, which is all this asserts.
-	_, _ = dial(context.Background(), "tcp", "rebind.example:9")
+	_, _ = dial(t.Context(), "tcp", "rebind.example:9")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -582,7 +584,7 @@ func TestRegression_caps_dial_attempts_at_maxDialIPs(t *testing.T) {
 	// All 20 loopback IPs pass the (allow-all) policy in the resolve-once loop;
 	// the dialer then attempts at most maxDialIPs of them on loopback:9 (no
 	// service -> each attempt fails fast and the loop continues).
-	_, _ = dial(context.Background(), "tcp", "many-ips.example:9")
+	_, _ = dial(t.Context(), "tcp", "many-ips.example:9")
 
 	mu.Lock()
 	total := policyCalls

@@ -33,7 +33,7 @@ func TestWithAddressPolicy_blocks_specific_host(t *testing.T) {
 	tr := SafeTransport(WithAddressPolicy(policy))
 	dial := tr.DialContext
 
-	_, err := dial(context.Background(), "tcp", "8.8.8.8:443")
+	_, err := dial(t.Context(), "tcp", "8.8.8.8:443")
 	if err == nil {
 		t.Error("expected error for policy-blocked IP 8.8.8.8, got nil")
 	}
@@ -47,7 +47,7 @@ func TestWithAddressPolicy_allows_normally_blocked_ip(t *testing.T) {
 
 	// 127.0.0.1 is normally blocked; with allow-all policy it should
 	// attempt the dial (will fail to connect, but the SSRF check passes).
-	_, err := dial(context.Background(), "tcp", "127.0.0.1:1")
+	_, err := dial(t.Context(), "tcp", "127.0.0.1:1")
 	if err == nil {
 		return
 	}
@@ -61,7 +61,7 @@ func TestWithAddressPolicy_nil_uses_default(t *testing.T) {
 	tr := SafeTransport(WithAddressPolicy(nil))
 	dial := tr.DialContext
 
-	_, err := dial(context.Background(), "tcp", "127.0.0.1:443")
+	_, err := dial(t.Context(), "tcp", "127.0.0.1:443")
 	if err == nil {
 		t.Error("nil policy should fall back to default; expected error for loopback")
 	}
@@ -73,7 +73,7 @@ func TestWithAddressPolicy_deny_all(t *testing.T) {
 	tr := SafeTransport(WithAddressPolicy(denyAll))
 	dial := tr.DialContext
 
-	_, err := dial(context.Background(), "tcp", "1.1.1.1:443")
+	_, err := dial(t.Context(), "tcp", "1.1.1.1:443")
 	if err == nil {
 		t.Error("deny-all policy should block 1.1.1.1, got nil")
 	}
@@ -91,7 +91,7 @@ func TestWithAddressPolicy_and_WithDialer_combined(t *testing.T) {
 	tr := SafeTransport(WithAddressPolicy(policy), WithDialer(d))
 	dial := tr.DialContext
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
 	// 1.1.1.1 should be blocked by the custom policy.
@@ -118,7 +118,7 @@ func TestSafeTransport_custom_policy_denial_kind(t *testing.T) {
 	t.Parallel()
 	denyAll := func(_ netip.Addr) bool { return false }
 	tr := SafeTransport(WithAddressPolicy(denyAll))
-	_, err := tr.DialContext(context.Background(), "tcp", "1.1.1.1:443")
+	_, err := tr.DialContext(t.Context(), "tcp", "1.1.1.1:443")
 	var ssrfError *Error
 	if !errors.As(err, &ssrfError) {
 		t.Fatalf("DialContext() error = %v, want *ssrf.Error", err)
@@ -133,7 +133,7 @@ func TestSafeTransport_custom_policy_denial_kind(t *testing.T) {
 func TestSafeTransport_default_policy_denial_kind(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport()
-	_, err := tr.DialContext(context.Background(), "tcp", "10.0.0.1:443")
+	_, err := tr.DialContext(t.Context(), "tcp", "10.0.0.1:443")
 	var ssrfError *Error
 	if !errors.As(err, &ssrfError) {
 		t.Fatalf("DialContext() error = %v, want *ssrf.Error", err)
@@ -160,7 +160,7 @@ func TestWithDialer_records_calls(t *testing.T) {
 	tr := SafeTransport(WithDialer(d))
 	dial := tr.DialContext
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
 	// 198.41.0.4 is a public IP (a.root-servers.net) that won't respond on port 80.
@@ -194,7 +194,7 @@ func TestWithResolver_blocks_private(t *testing.T) {
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
 	tr := SafeTransport(WithResolver(r))
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "evil.com:443")
+	_, err := dial(t.Context(), "tcp", "evil.com:443")
 	if err == nil {
 		t.Error("expected error for resolver returning private IP")
 	}
@@ -207,7 +207,7 @@ func TestWithResolver_nil_uses_default(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(WithResolver(nil))
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "127.0.0.1:443")
+	_, err := dial(t.Context(), "tcp", "127.0.0.1:443")
 	if err == nil {
 		t.Error("nil resolver should use default; expected error for loopback")
 	}
@@ -219,7 +219,7 @@ func TestSafeDialContext_blocks_resolver_metadata_ip(t *testing.T) {
 	t.Parallel()
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("169.254.169.254")}}
 	tr := SafeTransport(WithResolver(r), WithAllowedPorts(443))
-	_, err := tr.DialContext(context.Background(), "tcp", "evil.com:443")
+	_, err := tr.DialContext(t.Context(), "tcp", "evil.com:443")
 	if err == nil {
 		t.Error("resolver returning link-local metadata IP was not blocked")
 	}
@@ -266,7 +266,7 @@ func TestSafeTransport_nil_option_element(t *testing.T) {
 	if tr == nil || tr.DialContext == nil {
 		t.Fatal("SafeTransport with nil elements returned nil")
 	}
-	_, err := tr.DialContext(context.Background(), "tcp", "10.0.0.1:443")
+	_, err := tr.DialContext(t.Context(), "tcp", "10.0.0.1:443")
 	if err == nil {
 		t.Error("nil option elements broke default policy")
 	}
@@ -279,10 +279,10 @@ func TestSafeTransport_option_order_independent(t *testing.T) {
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
 
 	tr1 := SafeTransport(WithResolver(r), WithAllowedPorts(443))
-	_, err1 := tr1.DialContext(context.Background(), "tcp", "evil.com:443")
+	_, err1 := tr1.DialContext(t.Context(), "tcp", "evil.com:443")
 
 	tr2 := SafeTransport(WithAllowedPorts(443), WithResolver(r))
-	_, err2 := tr2.DialContext(context.Background(), "tcp", "evil.com:443")
+	_, err2 := tr2.DialContext(t.Context(), "tcp", "evil.com:443")
 
 	if err1 == nil {
 		t.Error("order A: private IP from resolver was not blocked")
@@ -298,7 +298,7 @@ func TestSafeTransport_control_hook_fires(t *testing.T) {
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
 	tr := SafeTransport(WithAddressPolicy(allowAll), WithResolver(r), WithAnyPort())
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "evil.com:1")
+	_, err := dial(t.Context(), "tcp", "evil.com:1")
 	if err != nil && strings.Contains(err.Error(), "not public") {
 		t.Errorf("allow-all policy should pass Control hook, got: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestWithAllowedPorts_blocks_disallowed(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(WithAllowedPorts(443))
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "8.8.8.8:80")
+	_, err := dial(t.Context(), "tcp", "8.8.8.8:80")
 	if err == nil {
 		t.Error("expected error for port 80 when only 443 allowed")
 	}
@@ -323,7 +323,7 @@ func TestWithAllowedPorts_allows_permitted(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(WithAllowedPorts(443, 80))
 	dial := tr.DialContext
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	_, err := dial(ctx, "tcp", "8.8.8.8:80")
 	if err != nil && strings.Contains(err.Error(), "not allowed") {
@@ -338,7 +338,7 @@ func TestWithAllowedPorts_empty_retains_default(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(WithAllowedPorts())
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "8.8.8.8:12345")
+	_, err := dial(t.Context(), "tcp", "8.8.8.8:12345")
 	if err == nil {
 		t.Error("empty WithAllowedPorts() should retain the 443-only default")
 	}
@@ -351,7 +351,7 @@ func TestWithAnyPort_allows_all(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport(WithAnyPort())
 	dial := tr.DialContext
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	_, err := dial(ctx, "tcp", "8.8.8.8:12345")
 	if err != nil && strings.Contains(err.Error(), "not allowed") {
@@ -363,7 +363,7 @@ func TestWithAllowedPorts_default_only_443(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport()
 	dial := tr.DialContext
-	_, err := dial(context.Background(), "tcp", "8.8.8.8:80")
+	_, err := dial(t.Context(), "tcp", "8.8.8.8:80")
 	if err == nil {
 		t.Error("default should only allow port 443")
 	}
@@ -380,7 +380,7 @@ func TestSafeTransport_port_allowlist_blocks_common(t *testing.T) {
 	dial := tr.DialContext
 	blockedPorts := []string{"80", "8080", "22", "3306", "6379", "11211"}
 	for _, port := range blockedPorts {
-		_, err := dial(context.Background(), "tcp", "8.8.8.8:"+port)
+		_, err := dial(t.Context(), "tcp", "8.8.8.8:"+port)
 		if err == nil {
 			t.Errorf("port %s allowed when only 443 permitted, want blocked", port)
 		}
