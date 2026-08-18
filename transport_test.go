@@ -296,7 +296,7 @@ func TestSafeTransport_control_hook_fires(t *testing.T) {
 	t.Parallel()
 	allowAll := func(_ netip.Addr) bool { return true }
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
-	tr := SafeTransport(WithAddressPolicy(allowAll), WithResolver(r), WithAnyPort())
+	tr := SafeTransport(WithAddressPolicy(allowAll), WithResolver(r), WithAllowedPorts(1))
 	dial := tr.DialContext
 	_, err := dial(t.Context(), "tcp", "evil.com:1")
 	if err != nil && strings.Contains(err.Error(), "not public") {
@@ -347,15 +347,39 @@ func TestWithAllowedPorts_empty_retains_default(t *testing.T) {
 	}
 }
 
-func TestWithAnyPort_allows_all(t *testing.T) {
+// The port axis has no off switch, and it fails CLOSED: an empty allowlist
+// refuses every port rather than allowing them. This is the invariant that
+// replaced WithAnyPort, so it is pinned directly — a regression that
+// reintroduced a nil-means-everything branch would otherwise be silent.
+func TestEmptyPortSetRefusesEverything(t *testing.T) {
 	t.Parallel()
-	tr := SafeTransport(WithAnyPort())
-	dial := tr.DialContext
+	for _, portStr := range []string{"443", "80", "12345", "not-a-port"} {
+		if err := checkAllowedPort(nil, "example.com", portStr, "dial"); err == nil {
+			t.Errorf("nil port set allowed port %q, want everything refused (fail closed)", portStr)
+		}
+		if err := checkAllowedPort(map[uint16]struct{}{}, "example.com", portStr, "dial"); err == nil {
+			t.Errorf("empty port set allowed port %q, want everything refused (fail closed)", portStr)
+		}
+	}
+}
+
+// An unparseable port is a KindBadPort refusal, not a fallthrough to the OS
+// resolver: net.Dialer would happily look up "http" as a service name.
+func TestUnparseablePortIsRefused(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport(
+		WithAllowedPorts(443),
+		WithAddressPolicy(func(netip.Addr) bool { return true }),
+	)
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
-	_, err := dial(ctx, "tcp", "8.8.8.8:12345")
-	if err != nil && strings.Contains(err.Error(), "not allowed") {
-		t.Errorf("all ports should be allowed, got: %v", err)
+	_, err := tr.DialContext(ctx, "tcp", "8.8.8.8:not-a-port")
+	if err == nil {
+		t.Fatal("dial to an unparseable port succeeded, want it refused")
+	}
+	var se *Error
+	if !errors.As(err, &se) || se.Kind != KindBadPort {
+		t.Errorf("error = %v, want a KindBadPort *Error", err)
 	}
 }
 
@@ -385,4 +409,35 @@ func TestSafeTransport_port_allowlist_blocks_common(t *testing.T) {
 			t.Errorf("port %s allowed when only 443 permitted, want blocked", port)
 		}
 	}
+}
+
+// WithAllowedPorts is last-wins with itself and an empty call is a no-op that
+// keeps whatever came before, so a caller can narrow in stages without a
+// zero-argument call silently opening or closing the axis.
+func TestWithAllowedPortsIsLastWins(t *testing.T) {
+	t.Parallel()
+	resolve := func(opts ...TransportOption) map[uint16]struct{} {
+		c := &transportConfig{allowedPorts: map[uint16]struct{}{443: {}}}
+		for _, o := range opts {
+			o(c)
+		}
+		return c.allowedPorts
+	}
+	if got := resolve(); len(got) != 1 || !hasPort(got, 443) {
+		t.Errorf("no options: set = %v, want the 443-only default", got)
+	}
+	if got := resolve(WithAllowedPorts()); len(got) != 1 || !hasPort(got, 443) {
+		t.Errorf("WithAllowedPorts(): set = %v, want the default retained", got)
+	}
+	if got := resolve(WithAllowedPorts(8443)); hasPort(got, 443) || !hasPort(got, 8443) {
+		t.Errorf("WithAllowedPorts(8443): set = %v, want it to replace the default", got)
+	}
+	if got := resolve(WithAllowedPorts(8443), WithAllowedPorts(9443)); hasPort(got, 8443) || !hasPort(got, 9443) {
+		t.Errorf("two calls: set = %v, want the later one to win", got)
+	}
+}
+
+func hasPort(set map[uint16]struct{}, p uint16) bool {
+	_, ok := set[p]
+	return ok
 }

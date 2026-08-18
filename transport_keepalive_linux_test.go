@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -92,11 +93,17 @@ func TestSafeTransport_defaultDialerKeepAlive(t *testing.T) {
 	}
 
 	// No WithDialer => SafeTransport uses its DEFAULT dialer (the line under
-	// test). Fake resolver pins every host to loopback; allow-all policy and
-	// all-ports open the dial path to the local listener.
+	// test). Fake resolver pins every host to loopback; the allow-all policy and
+	// the listener's own port open the dial path to it. The port is passed once
+	// the listener HAS one, which is the same move a caller makes for any peer
+	// on an ephemeral port -- there is no all-ports setting to reach for.
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("ParseUint(%q) error = %v", portStr, err)
+	}
 	allowAll := func(netip.Addr) bool { return true }
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
-	tr := SafeTransport(WithResolver(r), WithAddressPolicy(allowAll), WithAnyPort())
+	tr := SafeTransport(WithResolver(r), WithAddressPolicy(allowAll), WithAllowedPorts(uint16(port)))
 
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()

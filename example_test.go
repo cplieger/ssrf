@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/cplieger/ssrf/v3"
+	"github.com/cplieger/ssrf/v4"
 )
 
 func ExampleValidateURL() {
