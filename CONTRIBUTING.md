@@ -16,7 +16,7 @@ hardened `*http.Transport`. The public surface lives in a single file,
   predicates.
 - `SafeTransport(opts ...TransportOption)`: the hardened transport (see
   invariants below); configured via `WithAddressPolicy`, `WithDialer`,
-  `WithResolver`, `WithAllowedPorts`, and `WithAnyPort`.
+  `WithResolver`, and `WithAllowedPorts`.
 - `SafeRedirectPolicy`: HTTPS-only redirect policy; wire as
   `http.Client.CheckRedirect`; each redirect hop is re-validated.
 - `URLPolicy` (`NewURLPolicy(schemes...)`, `.Validate(raw)`,
@@ -47,6 +47,15 @@ These are the parts a change can silently break. Treat them as contracts.
   every resolved IP has been validated, so it bounds dial time against a
   resolver returning many valid-but-blackholed IPs without ever skipping a
   check (fail-closed).
+- **The port check has no off switch and fails closed.** `checkAllowedPort` has
+  no permissive branch: an empty or nil allowed-ports set refuses every port
+  rather than allowing every port, so a construction path that forgets the
+  allowlist blocks traffic instead of silently opening 65535 ports. Do not
+  reintroduce a `nil means unrestricted` shortcut, and do not add an option that
+  lifts the restriction — the removed `WithAnyPort` is the cautionary case. A
+  caller whose peer is on an unpredictable port passes that port once it is
+  known; the reference implementation this library mirrors
+  (`doyensec/safeurl`) likewise ships no escape hatch.
 - **`IsPublicHost` is a silent predicate; only enforcement logs.**
   `IsPublicHost` and the enforcement path share one classification core
   (`hostValidationError`), but only the enforcement wrapper

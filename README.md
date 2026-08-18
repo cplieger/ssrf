@@ -1,6 +1,6 @@
 # ssrf
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v3.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v3)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v4.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v4)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
@@ -13,12 +13,12 @@ Go library that validates URLs and IP addresses against SSRF attacks. Rejects pr
 
 ## Install
 
-`go get github.com/cplieger/ssrf/v3@latest`
+`go get github.com/cplieger/ssrf/v4@latest`
 
 ## Usage
 
 ```go
-import "github.com/cplieger/ssrf/v3"
+import "github.com/cplieger/ssrf/v4"
 
 // Validate a URL before fetching
 if err := ssrf.ValidateURL("https://example.com/data.json"); err != nil {
@@ -89,8 +89,14 @@ if ssrf.IsPublicAddr(addr) {
 - `WithAddressPolicy(AddressPolicy) TransportOption`: inject a custom allow/deny IP predicate
 - `WithDialer(*net.Dialer) TransportOption`: inject a custom net.Dialer
 - `WithResolver(Resolver) TransportOption`: inject a custom DNS resolver
-- `WithAllowedPorts(...uint16) TransportOption`: restrict outbound ports (default: 443 only; passing none keeps the default)
-- `WithAnyPort() TransportOption`: explicitly remove the port restriction
+- `WithAllowedPorts(...uint16) TransportOption`: restrict outbound ports
+  (default: 443 only; passing none keeps the default)
+
+There is deliberately no option to lift the port restriction, and an empty set
+refuses every port rather than allowing every one. A caller whose peer sits on
+a port it cannot know in advance builds its transport once the destination is
+known and passes that single port: pinning a validated destination is a
+stronger check than any standing permissive policy.
 
 ### Structured Errors
 

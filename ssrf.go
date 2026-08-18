@@ -163,8 +163,16 @@ func WithResolver(r Resolver) TransportOption {
 
 // WithAllowedPorts sets the ports that outbound connections may target.
 // By default only port 443 is allowed (matching the HTTPS-only posture).
-// Passing no ports retains that default; use [WithAnyPort] to remove the
-// restriction explicitly. Mirrors doyensec/safeurl AllowedPorts.
+// Passing no ports retains that default. Later calls replace the set, so this
+// is last-wins with itself.
+//
+// There is deliberately no way to switch the port check off. A caller whose
+// peer lives on a port it cannot enumerate ahead of time should build its
+// transport once the destination IS known and pass that one port — pinning the
+// destination it already validated is a stronger check than any standing
+// permissive policy, and it keeps the widest setting off this library's
+// surface. Mirrors doyensec/safeurl AllowedPorts, which likewise ships no
+// escape hatch.
 func WithAllowedPorts(ports ...uint16) TransportOption {
 	return func(c *transportConfig) {
 		if len(ports) == 0 {
@@ -175,14 +183,6 @@ func WithAllowedPorts(ports ...uint16) TransportOption {
 			m[p] = struct{}{}
 		}
 		c.allowedPorts = m
-	}
-}
-
-// WithAnyPort removes the outbound port restriction. Public-address policy
-// and both DNS-rebinding checks remain active.
-func WithAnyPort() TransportOption {
-	return func(c *transportConfig) {
-		c.allowedPorts = nil
 	}
 }
 
@@ -668,15 +668,16 @@ func (p URLPolicy) RedirectPolicy(
 	}
 }
 
-// checkAllowedPort verifies portStr is one of the permitted ports. A nil
-// allowedPorts allows all ports. stage ("control" or "dial") selects the
-// log/message context so both validation layers share one definition while
-// keeping their distinct diagnostics. Returns a KindBadPort error on an
-// unparseable or disallowed port.
+// checkAllowedPort verifies portStr is one of the permitted ports. stage
+// ("control" or "dial") selects the log/message context so both validation
+// layers share one definition while keeping their distinct diagnostics.
+// Returns a KindBadPort error on an unparseable or disallowed port.
+//
+// There is no permissive path: an empty or nil set refuses everything rather
+// than allowing everything, so a construction bug fails closed. That is why
+// an unparseable port needs no special case — it never reaches a lookup that
+// might have been switched off.
 func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage string) error {
-	if allowedPorts == nil {
-		return nil
-	}
 	p, parseErr := strconv.ParseUint(portStr, 10, 16)
 	if parseErr != nil {
 		slog.Default().Warn("ssrf "+stage+" blocked", "host", host, "port", portStr, "reason", "bad_port")
@@ -850,7 +851,7 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, po
 
 // SafeTransport returns an *http.Transport hardened against SSRF and
 // DNS rebinding. Use [WithAddressPolicy], [WithDialer], [WithResolver],
-// [WithAllowedPorts], and [WithAnyPort] to customize.
+// and [WithAllowedPorts] to customize.
 func SafeTransport(opts ...TransportOption) *http.Transport {
 	cfg := transportConfig{
 		policy: isPublicAddr,

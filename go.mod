@@ -1,4 +1,4 @@
-module github.com/cplieger/ssrf/v3
+module github.com/cplieger/ssrf/v4
 
 go 1.26.7
 
