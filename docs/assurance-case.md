@@ -35,12 +35,23 @@ re-validate the connected IP via the transport's `Control` hook," which closes
 the classic validate-then-connect TOCTOU gap that naive SSRF filters miss.
 Stdlib-only.
 
+The same check-then-use reasoning governs the redirect policy: it classifies the
+`*url.URL` net/http is about to dial rather than a re-parse of that URL's text,
+so there is no second object for the two halves to disagree about. No exported
+function returns or accepts a `*url.URL`, so a caller is never handed a parsed
+URL it could mutate after validation.
+
 ## Residual risks
 
 - The library protects requests routed _through_ it; a consumer that makes a
   raw `http.Get` bypasses the control. Correct wiring (use the provided client/
   transport for all user-influenced fetches) is the consumer's responsibility.
 - New address ranges or transition mechanisms could require blocklist updates.
+- Host classification is textual and performs no DNS lookup, so a public-looking
+  name that resolves to an internal address (`localhost.localdomain`) passes
+  `IsPublicHost` by design. `SafeTransport` is the layer that catches it, at
+  resolve time and again at socket time; a consumer using `ValidateURL` or
+  `IsPublicHost` without the transport gets scheme and syntax checking only.
 
 Report vulnerabilities privately per
 [SECURITY.md](https://github.com/cplieger/.github/blob/main/SECURITY.md).

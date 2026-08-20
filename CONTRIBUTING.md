@@ -61,7 +61,7 @@ These are the parts a change can silently break. Treat them as contracts.
   (`hostValidationError`), but only the enforcement wrapper
   (`validateURLWithSchemes`, reached via `ValidateURL`) emits a `slog.Warn`; the
   redirect policy re-validates each hop through the silent core
-  (`classifyURLWithSchemes`) and emits its own single `ssrf redirect blocked`
+  (`classifyURL`) and emits its own single `ssrf redirect blocked`
   line. Keep `IsPublicHost` log-free so callers can probe host publicness
   without polluting block dashboards. All logging goes through `slog.Default()` (there
   is no per-instance logger option), and every block log carries a bounded
@@ -82,13 +82,19 @@ These are the parts a change can silently break. Treat them as contracts.
   toolchain's Unicode tables, which move between releases — Unicode 17 (Go 1.27)
   changed `SimpleFold` for U+0390/U+1FD3, U+03B0/U+1FE3 and U+FB05/U+FB06. Note
   the two relations are not interchangeable: U+0130 lowercases to `i` but does
-  not fold with it, while U+212A does both. `TestEqualASCIIFold` and
-  `TestHostValidation_noRuneSubstitutionIntoLocalhostIsAccepted` pin this, and
-  each divergence case carries a staleness guard that fails if the input stops
-  laundering under the wider relation.
+  not fold with it, while U+212A does both. `TestEqualASCIIFold`,
+  `TestHostValidation_noRuneSubstitutionIntoLocalhostIsAccepted` and
+  `TestURLPolicyRedirectPolicy_schemeDoesNotLaunderThroughCaseFolding` pin all of
+  this, and each divergence case carries a staleness guard that fails if the
+  input stops laundering under the wider relation.
+- **The redirect policy judges `req.URL`, not a re-parse of its text.**
+  `classifyURL` takes the `*url.URL` net/http is about to dial, so the check and
+  the use cannot land on two different objects. Do not reintroduce a
+  `classifyURLWithSchemes(req.URL.String(), …)` round trip: it also means a
+  caller-constructed `*url.URL` reaches the scheme check with bytes `url.Parse`
+  could never produce, which is why the scheme fold above has to be ASCII-exact.
 - **`isPublicAddr` unmaps first.** IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
-  unmapped before any prefix check, so IPv4 block ranges still apply.
-- **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
+  unmapped before any prefix check, so IPv4 block ranges still apply.- **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
   (`2002::/16`), NAT64 well-known (`64:ff9b::/96`), Teredo (`2001::/32`; server
   IPv4 in bytes 4–7 and client IPv4 XOR-inverted in bytes 12–15, both
   validated), and IPv4-compatible (`::/96`) all extract the embedded IPv4 and

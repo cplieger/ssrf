@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"testing"
 )
 
@@ -242,5 +243,77 @@ func TestURLPolicy_zero_value_is_https_default(t *testing.T) {
 	req2, _ := newTestReq("https://example.com/ok")
 	if err := policy(req2, nil); err != nil {
 		t.Errorf("HTTPS to public domain should pass, got: %v", err)
+	}
+}
+
+// The redirect policy judges the *url.URL net/http is about to dial, so a
+// caller-constructed URL reaches the scheme check with whatever bytes it holds
+// — url.Parse can never produce a non-ASCII scheme, but a struct literal can.
+// Folding that scheme over Unicode would let U+212A KELVIN SIGN launder into an
+// allowed scheme containing "k": strings.ToLower("\u212Aafka") is exactly
+// "kafka". Folding over ASCII refuses it.
+func TestURLPolicyRedirectPolicy_schemeDoesNotLaunderThroughCaseFolding(t *testing.T) {
+	t.Parallel()
+	policy := NewURLPolicy("kafka").RedirectPolicy(nil)
+	cases := []struct {
+		name   string
+		scheme string
+		want   ErrorKind // 0 means "must be allowed"
+	}{
+		{"exact", "kafka", 0},
+		{"ASCII uppercase folds", "KAFKA", 0},
+		{"ASCII mixed case folds", "KaFkA", 0},
+		{"kelvin sign does not fold", "\u212Aafka", KindBadScheme},
+		{"kelvin sign mid-token does not fold", "kaf\u212Aa", KindBadScheme},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := &http.Request{URL: &url.URL{Scheme: tc.scheme, Host: "example.com", Path: "/x"}}
+			err := policy(req, nil)
+			if tc.want == 0 {
+				if err != nil {
+					t.Fatalf("scheme %q = %v, want allowed", tc.scheme, err)
+				}
+				return
+			}
+			se, ok := errors.AsType[*Error](err)
+			if !ok {
+				t.Fatalf("scheme %q error = %v, want *ssrf.Error", tc.scheme, err)
+			}
+			if se.Kind != tc.want {
+				t.Errorf("scheme %q Kind = %d, want %d", tc.scheme, se.Kind, tc.want)
+			}
+		})
+	}
+}
+
+// A caller-constructed URL is classified from its fields, so a non-public Host
+// is refused even when no round-trip through the URL's text takes place.
+func TestURLPolicyRedirectPolicy_classifiesCallerBuiltURLFields(t *testing.T) {
+	t.Parallel()
+	policy := SafeRedirectPolicy(nil)
+	cases := []struct {
+		name string
+		url  *url.URL
+		want ErrorKind
+	}{
+		{"private host", &url.URL{Scheme: "https", Host: "192.168.1.77", Path: "/internal"}, KindNonPublicIP},
+		{"localhost", &url.URL{Scheme: "https", Host: "localhost", Path: "/x"}, KindLocalhost},
+		{"bare hostname", &url.URL{Scheme: "https", Host: "internal", Path: "/x"}, KindBareHostname},
+		{"empty host", &url.URL{Scheme: "https", Path: "/x"}, KindEmptyHost},
+		{"scheme downgrade", &url.URL{Scheme: "http", Host: "example.com", Path: "/x"}, KindBadScheme},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			se, ok := errors.AsType[*Error](policy(&http.Request{URL: tc.url}, nil))
+			if !ok {
+				t.Fatalf("policy(%v) did not return an *ssrf.Error", tc.url)
+			}
+			if se.Kind != tc.want {
+				t.Errorf("policy(%v) Kind = %d, want %d", tc.url, se.Kind, tc.want)
+			}
+		})
 	}
 }
