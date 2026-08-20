@@ -19,14 +19,14 @@ when a consumer routes user-influenced URLs through it.
 
 ## Threats and mitigations
 
-| Threat                                                                       | Mitigation                                                                            | Evidence               |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------- |
-| Direct request to private / loopback / link-local / CGNAT ranges             | explicit blocklist of all such ranges (IPv4 + IPv6)                                   | range tests            |
-| IPv6 transition bypasses (6to4, NAT64, Teredo, IPv4-mapped, IPv4-compatible) | those embeddings are decoded and blocked                                              | dedicated bypass tests |
-| DNS rebinding (validate one IP, connect to another)                          | resolve-once + `Dialer.Control` re-validates the _actually-connected_ IP at dial time | transport tests        |
-| Redirect-based bypass (validated URL 302s to an internal one)                | every redirect hop is re-validated; redirect chains are capped at 10 hops             | redirect tests         |
-| Malformed/edge-case URLs slipping past the parser                            | hardened parsing under fuzz                                                           | `*_fuzz_test.go`       |
-| Case-folding laundering of a host or scheme (`localhoſt`, `\u212Aafka`)       | every case comparison folds over ASCII only, so a rune outside the grammar cannot match a literal | `TestEqualASCIIFold`, `TestHostValidation_noRuneSubstitutionIntoLocalhostIsAccepted` |
+| Threat                                                                       | Mitigation                                                                                         | Evidence               |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | ---------------------- |
+| Direct request to private / loopback / link-local / CGNAT ranges             | explicit blocklist of all such ranges (IPv4 + IPv6)                                                | range tests            |
+| IPv6 transition bypasses (6to4, NAT64, Teredo, IPv4-mapped, IPv4-compatible) | those embeddings are decoded and blocked                                                           | dedicated bypass tests |
+| DNS rebinding (validate one IP, connect to another)                          | resolve-once + `Dialer.Control` re-validates the _actually-connected_ IP at dial time              | transport tests        |
+| Redirect-based bypass (validated URL 302s to an internal one)                | every redirect hop is re-validated; redirect chains are capped at 10 hops                          | redirect tests         |
+| Malformed/edge-case URLs slipping past the parser                            | hardened parsing under fuzz                                                                        | `*_fuzz_test.go`       |
+| Case-folding laundering of a host or scheme (`localhoſt`, `\u212Aafka`)      | every case comparison folds over ASCII only, so a rune the grammar excludes cannot match a literal | fold tests             |
 
 ## Design note
 
