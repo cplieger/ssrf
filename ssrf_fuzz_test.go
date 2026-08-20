@@ -445,21 +445,17 @@ func FuzzSafeControl(f *testing.F) {
 
 // extractHost extracts the host part from a host:port string.
 func extractHost(address string) string {
-	if len(address) == 0 {
-		return ""
-	}
-	if address[0] == '[' {
-		end := strings.IndexByte(address, ']')
-		if end < 0 {
+	if rest, bracketed := strings.CutPrefix(address, "["); bracketed {
+		inner, _, closed := strings.Cut(rest, "]")
+		if !closed {
 			return ""
 		}
-		return address[1:end]
+		return inner
 	}
-	colon := strings.LastIndexByte(address, ':')
-	if colon < 0 {
-		return address
-	}
-	return address[:colon]
+	// CutLast returns the whole input as before when the separator is absent,
+	// which is exactly the port-less case, so no found check is needed.
+	host, _, _ := strings.CutLast(address, ":")
+	return host
 }
 
 func FuzzValidateURLWithSchemes(f *testing.F) {
