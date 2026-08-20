@@ -62,8 +62,8 @@ func TestSafeRedirectPolicy_hop_cap_kind(t *testing.T) {
 	via := make([]*http.Request, maxRedirects)
 	err := policy(req, via)
 
-	var ssrfErr *Error
-	if !errors.As(err, &ssrfErr) {
+	ssrfErr, ok := errors.AsType[*Error](err)
+	if !ok {
 		t.Fatalf("SafeRedirectPolicy() error = %v, want *ssrf.Error", err)
 	}
 	if ssrfErr.Kind != KindTooManyRedirects {
@@ -93,8 +93,8 @@ func TestSafeRedirectPolicy_propagates_inner_kind(t *testing.T) {
 			t.Parallel()
 			req, _ := newTestReq(tc.url)
 			err := policy(req, nil)
-			var ssrfErr *Error
-			if !errors.As(err, &ssrfErr) {
+			ssrfErr, ok := errors.AsType[*Error](err)
+			if !ok {
 				t.Fatalf("SafeRedirectPolicy(%q) error = %v, want *ssrf.Error", tc.url, err)
 			}
 			if ssrfErr.Kind != tc.want {

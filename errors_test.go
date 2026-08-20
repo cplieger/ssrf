@@ -27,8 +27,8 @@ func TestError_Kind(t *testing.T) {
 			if err == nil {
 				t.Fatalf("ValidateURL(%q) = nil, want error", tc.url)
 			}
-			var ssrfError *Error
-			if !errors.As(err, &ssrfError) {
+			ssrfError, ok := errors.AsType[*Error](err)
+			if !ok {
 				t.Fatalf("ValidateURL(%q) error is not *Error: %T", tc.url, err)
 			}
 			if ssrfError.Kind != tc.kind {
@@ -44,8 +44,7 @@ func TestError_Unwrap(t *testing.T) {
 	if err == nil {
 		t.Skip("URL parsed without error")
 	}
-	var ssrfError *Error
-	if errors.As(err, &ssrfError) {
+	if ssrfError, ok := errors.AsType[*Error](err); ok {
 		// KindInvalidURL should wrap the url.Parse error
 		if ssrfError.Kind == KindInvalidURL && ssrfError.Err == nil {
 			t.Error("KindInvalidURL should wrap underlying parse error")

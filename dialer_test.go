@@ -107,8 +107,7 @@ func TestSafeDialContext_empty_resolution_blocked(t *testing.T) {
 	if err == nil {
 		t.Fatal("DialContext() = nil, want error when resolver returns no IPs")
 	}
-	var ssrfError *Error
-	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindDNSFailed {
+	if ssrfError, ok := errors.AsType[*Error](err); !ok || ssrfError.Kind != KindDNSFailed {
 		t.Errorf("DialContext() error = %v, want KindDNSFailed", err)
 	}
 	if !strings.Contains(err.Error(), "no IPs resolved") {
@@ -148,9 +147,9 @@ func TestSafeDialContext_disallowed_port_kind(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected port error")
 	}
-	var se *Error
-	if !errors.As(err, &se) {
-		t.Fatalf("errors.As failed: %T", err)
+	se, ok := errors.AsType[*Error](err)
+	if !ok {
+		t.Fatalf("errors.AsType[*Error] failed: %T", err)
 	}
 	if se.Kind != KindBadPort {
 		t.Errorf("got Kind %d, want KindBadPort (%d)", se.Kind, KindBadPort)
@@ -173,8 +172,7 @@ func TestSafeDialContext_gives_dns_lookup_a_generous_budget(t *testing.T) {
 	if err == nil {
 		t.Fatalf("dial(slow-dns.example:1) = nil err, want a dial failure on loopback:1")
 	}
-	var sErr *Error
-	if errors.As(err, &sErr) && sErr.Kind == KindDNSFailed {
+	if sErr, ok := errors.AsType[*Error](err); ok && sErr.Kind == KindDNSFailed {
 		t.Errorf("dial(slow-dns.example:1) = KindDNSFailed (%v); want the DNS lookup to succeed under the 5s budget", err)
 	}
 }
@@ -273,8 +271,7 @@ func TestSafeControl_blocks_disallowed_port(t *testing.T) {
 	if err == nil {
 		t.Error("safeControl() = nil, want error for port 80 when only 443 allowed")
 	}
-	var ssrfError *Error
-	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindBadPort {
+	if ssrfError, ok := errors.AsType[*Error](err); !ok || ssrfError.Kind != KindBadPort {
 		t.Errorf("expected KindBadPort, got %v", err)
 	}
 }
@@ -329,8 +326,7 @@ func TestSafeControl_rejects_malformed_inputs(t *testing.T) {
 			if err == nil {
 				t.Errorf("safeControl(%q, %q) = nil, want error", tc.network, tc.address)
 			}
-			var ssrfError *Error
-			if !errors.As(err, &ssrfError) {
+			if _, ok := errors.AsType[*Error](err); !ok {
 				t.Errorf("safeControl(%q, %q) error is not *Error: %T", tc.network, tc.address, err)
 			}
 		})
@@ -347,8 +343,7 @@ func TestSafeControl_unparseable_port_with_allowlist(t *testing.T) {
 	if err == nil {
 		t.Fatal("safeControl(tcp4, 8.8.8.8:notaport) = nil, want error for unparseable port")
 	}
-	var ssrfError *Error
-	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindBadPort {
+	if ssrfError, ok := errors.AsType[*Error](err); !ok || ssrfError.Kind != KindBadPort {
 		t.Errorf("safeControl(tcp4, 8.8.8.8:notaport) Kind = %v, want KindBadPort", err)
 	}
 }
@@ -424,8 +419,8 @@ func TestRegression_dial_invalid_port_rejected(t *testing.T) {
 			if err == nil {
 				t.Errorf("dial(%q) = nil, want error for invalid port", tc.addr)
 			}
-			var ssrfError *Error
-			if !errors.As(err, &ssrfError) {
+			ssrfError, ok := errors.AsType[*Error](err)
+			if !ok {
 				t.Fatalf("dial(%q) error = %v, want *ssrf.Error", tc.addr, err)
 			}
 			if ssrfError.Kind != KindBadPort {
