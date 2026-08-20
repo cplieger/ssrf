@@ -495,3 +495,140 @@ func TestIsPublicHost_rejects_noncanonical_ipv4_and_whitespace(t *testing.T) {
 		})
 	}
 }
+
+// equalASCIIFold must fold the ASCII letters and nothing else. The Unicode
+// launderings below are the whole point: strings.EqualFold accepts them and
+// this package must not, because a host's grammar is ASCII (RFC 1035; an
+// internationalized name arrives as an "xn--" A-label).
+func TestEqualASCIIFold(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		s, u string
+		want bool
+	}{
+		{"identical", "localhost", "localhost", true},
+		{"upper vs lower", "LOCALHOST", "localhost", true},
+		{"mixed case", "LocalHost", "localhost", true},
+		{"different length", "localhos", "localhost", false},
+		{"different letter", "localhoxt", "localhost", false},
+		{"long s launders under Unicode folding", "localho\u017ft", "localhost", false},
+		{"kelvin sign launders under Unicode folding", "\u212Aafka", "kafka", false},
+		{"dotted capital I launders under strings.ToLower", "\u0130nternal", "internal", false},
+		{"Unicode 17 fold pair U+0390/U+1FD3", "\u0390", "\u1FD3", false},
+		{"Unicode 17 fold pair U+03B0/U+1FE3", "\u03B0", "\u1FE3", false},
+		{"Unicode 17 fold pair U+FB05/U+FB06", "\uFB05", "\uFB06", false},
+		{"empty vs empty", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := equalASCIIFold(tc.s, tc.u); got != tc.want {
+				t.Errorf("equalASCIIFold(%q, %q) = %v, want %v", tc.s, tc.u, got, tc.want)
+			}
+		})
+	}
+}
+
+// The launderings above must actually launder, or the divergence cases are
+// stale and assert nothing. Note the two relations are NOT interchangeable and
+// the guard therefore splits by relation: U+0130 lowercases to "i" but does not
+// FOLD with it, while U+212A does both. Measured on go1.26.7 and go1.27.0,
+// U+0130 and U+212A are the only two non-ASCII runes whose strings.ToLower image
+// is pure ASCII. The three pairs began folding in Unicode 17 (Go 1.27), which is
+// why the go directive is the floor for this test.
+func TestEqualASCIIFold_divergesFromUnicodeFolding(t *testing.T) {
+	t.Parallel()
+	folds := [][2]string{
+		{"localho\u017ft", "localhost"},
+		{"\u212Aafka", "kafka"},
+		{"\u0390", "\u1FD3"},
+		{"\u03B0", "\u1FE3"},
+		{"\uFB05", "\uFB06"},
+	}
+	for _, p := range folds {
+		if !strings.EqualFold(p[0], p[1]) {
+			t.Errorf("strings.EqualFold(%q, %q) = false; this input no longer launders, so the divergence case is stale", p[0], p[1])
+		}
+	}
+	lowers := [][2]string{
+		{"\u0130nternal", "internal"},
+		{"\u212Aafka", "kafka"},
+	}
+	for _, p := range lowers {
+		if strings.ToLower(p[0]) != p[1] {
+			t.Errorf("strings.ToLower(%q) = %q, want %q; this input no longer launders, so the divergence case is stale", p[0], strings.ToLower(p[0]), p[1])
+		}
+	}
+	// The distinction itself, pinned: a rune can launder under one relation and
+	// not the other, which is why neither strings.ToLower nor strings.EqualFold
+	// can stand in for the other at a security comparison.
+	if strings.EqualFold("\u0130nternal", "internal") {
+		t.Error(`strings.EqualFold("\u0130nternal", "internal") = true; U+0130 now folds as well as lowercases, so the ToLower-only case is stale`)
+	}
+}
+
+// No single-rune substitution into "localhost" is ever accepted, whichever fold
+// relation is used. This is the invariant the EqualFold -> equalASCIIFold change
+// rests on: measured over all 1,114,112 code points at all nine positions, the
+// two relations disagree on exactly one input ("localho\u017ft") and the
+// accept/reject verdict does not move for it — only the Kind, from KindLocalhost
+// to the more accurate KindBareHostname.
+func TestHostValidation_noRuneSubstitutionIntoLocalhostIsAccepted(t *testing.T) {
+	t.Parallel()
+	const base = "localhost"
+	divergences := 0
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF { // surrogates are not scalar values
+			continue
+		}
+		sub := string(r)
+		for i := range base {
+			letter := base[i : i+1]
+			uni, ascii := strings.EqualFold(sub, letter), equalASCIIFold(sub, letter)
+			if !uni && !ascii {
+				continue // not a fold candidate here; the other gates own it
+			}
+			if uni != ascii {
+				divergences++
+			}
+			cand := base[:i] + sub + base[i+1:]
+			if verr := hostValidationError(cand); verr == nil {
+				t.Fatalf("hostValidationError(%q) = nil (U+%04X at %d), want a rejection", cand, r, i)
+			}
+		}
+	}
+	if divergences != 1 {
+		t.Errorf("fold relations disagree on %d substitutions, want exactly 1 (localho\\u017ft)", divergences)
+	}
+}
+
+// A laundered localhost stays rejected; it is simply named for what it is.
+func TestHostValidation_localhostKinds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		host string
+		want ErrorKind
+	}{
+		{"localhost", KindLocalhost},
+		{"LOCALHOST", KindLocalhost},
+		{"LocalHost", KindLocalhost},
+		{"localhost.", KindLocalhost},
+		// Under Unicode folding this was KindLocalhost. It is not localhost —
+		// no resolver maps it to loopback — so it is a bare hostname, and it is
+		// rejected either way.
+		{"localho\u017ft", KindBareHostname},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			t.Parallel()
+			verr := hostValidationError(tc.host)
+			if verr == nil {
+				t.Fatalf("hostValidationError(%q) = nil, want a rejection", tc.host)
+			}
+			if verr.Kind != tc.want {
+				t.Errorf("hostValidationError(%q) Kind = %d, want %d", tc.host, verr.Kind, tc.want)
+			}
+		})
+	}
+}

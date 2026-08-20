@@ -84,6 +84,13 @@ if ssrf.IsPublicAddr(addr) {
 - `URLPolicy.Validate(raw string) error`: checks scheme is allowed and host is public
 - `URLPolicy.RedirectPolicy(next) func`: redirect policy validating each hop against the policy's schemes
 
+Scheme and host matching is case-insensitive over ASCII and byte-exact outside
+it, which is the whole of the RFC 3986 scheme grammar and the RFC 1035 hostname
+grammar (an internationalized name arrives as an `xn--` A-label). Folding wider
+would let a rune the grammar excludes match a literal — `strings.EqualFold`
+treats `localhoſt` as `localhost` — so these verdicts are also independent of the
+toolchain's Unicode tables.
+
 ### Transport options
 
 - `WithAddressPolicy(AddressPolicy) TransportOption`: inject a custom allow/deny IP predicate

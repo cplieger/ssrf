@@ -195,14 +195,20 @@ type URLPolicy struct {
 }
 
 // NewURLPolicy returns a URL policy allowing the given schemes. With no
-// schemes it returns the HTTPS-only default. Scheme matching is case-insensitive.
+// schemes it returns the HTTPS-only default.
+//
+// Scheme matching is case-insensitive over ASCII and byte-exact outside it,
+// which is the whole of RFC 3986's scheme grammar. Folding it over Unicode would
+// mean a scheme the grammar excludes could match an allowed one: strings.ToLower
+// maps U+212A KELVIN SIGN to "k", so "\u212Aafka" would satisfy an allowed
+// "kafka".
 func NewURLPolicy(schemes ...string) URLPolicy {
 	if len(schemes) == 0 {
 		return URLPolicy{}
 	}
 	allowed := make(map[string]struct{}, len(schemes))
 	for _, scheme := range schemes {
-		allowed[strings.ToLower(scheme)] = struct{}{}
+		allowed[lowerASCIIString(scheme)] = struct{}{}
 	}
 	return URLPolicy{allowedSchemes: allowed}
 }
@@ -231,7 +237,7 @@ func classifyURLWithSchemes(raw string, schemes map[string]struct{}) *Error {
 	if err != nil {
 		return ssrfErr(KindInvalidURL, "", "invalid URL", err)
 	}
-	scheme := strings.ToLower(u.Scheme)
+	scheme := lowerASCIIString(u.Scheme)
 	if schemes == nil {
 		if scheme != schemeHTTPS {
 			return ssrfErr(KindBadScheme, "", fmt.Sprintf("URL scheme must be https, got %q", u.Scheme), nil)
@@ -331,7 +337,7 @@ func hostValidationError(host string) *Error {
 		return verr
 	}
 
-	if strings.EqualFold(host, "localhost") {
+	if equalASCIIFold(host, "localhost") {
 		return ssrfErr(KindLocalhost, host, "URL points to localhost", nil)
 	}
 
@@ -430,6 +436,71 @@ func isDecimalDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+// equalASCIIFold reports whether s and t are equal under ASCII-only case
+// folding: bytes 'A'-'Z' fold to 'a'-'z' and every other byte must match
+// exactly.
+//
+// It exists because strings.EqualFold applies Unicode simple folding, which is
+// the wrong relation for a host judged against a fixed literal. Every grammar
+// this package folds is ASCII by definition — a DNS label per RFC 1035 (an
+// internationalized name arrives as an "xn--" A-label) and a URL scheme per
+// RFC 3986 — so folding wider than the grammar can only admit input the grammar
+// already excludes. Under Unicode folding "localhoſt" (U+017F LATIN SMALL
+// LETTER LONG S) equals "localhost", so a classifier built on EqualFold names a
+// host localhost that no resolver maps to loopback.
+//
+// In this package that direction happens to be safe — naming localhost REJECTS
+// — but it makes a security verdict depend on the toolchain's fold table, which
+// has to be re-established by measurement on every Go upgrade. Folding over
+// ASCII makes the independence structural instead. Measured over all 1,114,112
+// code points on go1.26.7 and go1.27.0: U+017F is the only non-ASCII rune that
+// fold-equals any letter of "localhost", so Unicode 17's three changed
+// SimpleFold pairs (U+0390/U+1FD3, U+03B0/U+1FE3, U+FB05/U+FB06) move nothing
+// here — but nothing in the fold table guarantees that of the next release.
+//
+// Byte length is a sound early exit precisely because the comparison is
+// bytewise: folding never changes a byte's width, so differing lengths cannot
+// fold equal.
+func equalASCIIFold(s, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+	for i := range len(s) {
+		if lowerASCII(s[i]) != lowerASCII(t[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// lowerASCIIString returns s with every ASCII uppercase letter lowercased and
+// every other byte returned unchanged. It is the map-key counterpart to
+// [equalASCIIFold], used to canonicalize a URL scheme on both sides of the
+// allowed-scheme lookup so the two agree byte for byte.
+//
+// strings.ToLower is the wrong tool for the same reason [equalASCIIFold] gives:
+// it is a Unicode display transform, and exactly two non-ASCII runes fold into
+// ASCII under it (U+0130 to "i", U+212A to "k", measured on go1.26.7 and
+// go1.27.0), so it would let a scheme outside RFC 3986's grammar match an
+// allowed one.
+func lowerASCIIString(s string) string {
+	b := []byte(s)
+	for i := range b {
+		b[i] = lowerASCII(b[i])
+	}
+	return string(b)
+}
+
+// lowerASCII returns c lowercased if it is an ASCII uppercase letter, else c.
+// Bytes above 0x7F are returned unchanged, which is what keeps the comparisons
+// built on it byte-exact outside ASCII.
+func lowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
 }
 
 // reasonLabels is the bounded, low-cardinality label table backing

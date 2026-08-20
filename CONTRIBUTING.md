@@ -68,6 +68,24 @@ These are the parts a change can silently break. Treat them as contracts.
   snake_case `reason` from `reasonLabel(ErrorKind)`; never put a host or IP in
   the `reason` attribute (use the `error` key for detail) or block-dashboard
   cardinality blows up.
+- **Every case comparison folds over ASCII, never Unicode.** The host check
+  against `localhost` uses `equalASCIIFold` and the scheme lookup canonicalizes
+  through `lowerASCIIString`; neither uses `strings.EqualFold` or
+  `strings.ToLower`. Both grammars are ASCII by definition (a DNS label per
+  RFC 1035 — an internationalized name arrives as an `xn--` A-label — and a URL
+  scheme per RFC 3986), so folding wider than the grammar can only admit input
+  the grammar excludes. Concretely, `strings.EqualFold("localhoſt", "localhost")`
+  is true (U+017F) and `strings.ToLower("\u212Aafka")` is `"kafka"` (U+212A
+  KELVIN SIGN), so the wider relations would classify a host as `localhost` that
+  no resolver maps to loopback, and would let a scheme outside the grammar match
+  an allowed one. Folding over ASCII also keeps these verdicts independent of the
+  toolchain's Unicode tables, which move between releases — Unicode 17 (Go 1.27)
+  changed `SimpleFold` for U+0390/U+1FD3, U+03B0/U+1FE3 and U+FB05/U+FB06. Note
+  the two relations are not interchangeable: U+0130 lowercases to `i` but does
+  not fold with it, while U+212A does both. `TestEqualASCIIFold` and
+  `TestHostValidation_noRuneSubstitutionIntoLocalhostIsAccepted` pin this, and
+  each divergence case carries a staleness guard that fails if the input stops
+  laundering under the wider relation.
 - **`isPublicAddr` unmaps first.** IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
   unmapped before any prefix check, so IPv4 block ranges still apply.
 - **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
