@@ -37,9 +37,7 @@ Stdlib-only.
 
 The same check-then-use reasoning governs the redirect policy: it classifies the
 `*url.URL` net/http is about to dial rather than a re-parse of that URL's text,
-so there is no second object for the two halves to disagree about. No exported
-function returns or accepts a `*url.URL`, so a caller is never handed a parsed
-URL it could mutate after validation.
+so there is no second object for the two halves to disagree about.
 
 ## Residual risks
 
