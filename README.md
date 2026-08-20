@@ -84,12 +84,17 @@ if ssrf.IsPublicAddr(addr) {
 - `URLPolicy.Validate(raw string) error`: checks scheme is allowed and host is public
 - `URLPolicy.RedirectPolicy(next) func`: redirect policy validating each hop against the policy's schemes
 
+`ValidateURL`, `IsPublicHost` and `URLPolicy.Validate` do no DNS lookup: they
+judge the host as written. A public-looking name that resolves to an internal
+address passes them. Pair them with `SafeTransport`, which validates the
+resolved IP and again the connected IP at dial time.
+
 Scheme and host matching is case-insensitive over ASCII and byte-exact outside
 it, which is the whole of the RFC 3986 scheme grammar and the RFC 1035 hostname
 grammar (an internationalized name arrives as an `xn--` A-label). Folding wider
-would let a rune the grammar excludes match a literal — `strings.EqualFold`
-treats `localhoſt` as `localhost` — so these verdicts are also independent of the
-toolchain's Unicode tables.
+lets a rune the grammar excludes match a literal: `strings.EqualFold` treats
+`localhoſt` as `localhost`. Folding over ASCII also keeps these verdicts
+independent of the toolchain's Unicode tables.
 
 ### Transport options
 
@@ -99,8 +104,8 @@ toolchain's Unicode tables.
 - `WithAllowedPorts(...uint16) TransportOption`: restrict outbound ports
   (default: 443 only; passing none keeps the default)
 
-There is deliberately no option to lift the port restriction, and an empty set
-refuses every port rather than allowing every one. A caller whose peer sits on
+This library deliberately ships no option to lift the port restriction. An empty
+set refuses every port; it never allows every one. A caller whose peer sits on
 a port it cannot know in advance builds its transport once the destination is
 known and passes that single port: pinning a validated destination is a
 stronger check than any standing permissive policy.

@@ -48,13 +48,13 @@ These are the parts a change can silently break. Treat them as contracts.
   resolver returning many valid-but-blackholed IPs without ever skipping a
   check (fail-closed).
 - **The port check has no off switch and fails closed.** `checkAllowedPort` has
-  no permissive branch: an empty or nil allowed-ports set refuses every port
-  rather than allowing every port, so a construction path that forgets the
-  allowlist blocks traffic instead of silently opening 65535 ports. Do not
-  reintroduce a `nil means unrestricted` shortcut, and do not add an option that
-  lifts the restriction — the removed `WithAnyPort` is the cautionary case. A
-  caller whose peer is on an unpredictable port passes that port once it is
-  known; the reference implementation this library mirrors
+  no permissive branch: an empty or nil allowed-ports set refuses every port, so
+  a construction path that forgets the allowlist blocks traffic instead of
+  silently opening 65535 ports. Do not reintroduce a `nil means unrestricted`
+  shortcut, and do not add an option that lifts the restriction; the removed
+  `WithAnyPort` is the cautionary case. A caller whose peer is on an
+  unpredictable port passes that port once it is known; the reference
+  implementation this library mirrors
   (`doyensec/safeurl`) likewise ships no escape hatch.
 - **`IsPublicHost` is a silent predicate; only enforcement logs.**
   `IsPublicHost` and the enforcement path share one classification core
@@ -72,14 +72,14 @@ These are the parts a change can silently break. Treat them as contracts.
   against `localhost` uses `equalASCIIFold` and the scheme lookup canonicalizes
   through `lowerASCIIString`; neither uses `strings.EqualFold` or
   `strings.ToLower`. Both grammars are ASCII by definition (a DNS label per
-  RFC 1035 — an internationalized name arrives as an `xn--` A-label — and a URL
+  RFC 1035; an internationalized name arrives as an `xn--` A-label; and a URL
   scheme per RFC 3986), so folding wider than the grammar can only admit input
   the grammar excludes. Concretely, `strings.EqualFold("localhoſt", "localhost")`
   is true (U+017F) and `strings.ToLower("\u212Aafka")` is `"kafka"` (U+212A
   KELVIN SIGN), so the wider relations would classify a host as `localhost` that
   no resolver maps to loopback, and would let a scheme outside the grammar match
   an allowed one. Folding over ASCII also keeps these verdicts independent of the
-  toolchain's Unicode tables, which move between releases — Unicode 17 (Go 1.27)
+  toolchain's Unicode tables, which move between releases: Unicode 17 (Go 1.27)
   changed `SimpleFold` for U+0390/U+1FD3, U+03B0/U+1FE3 and U+FB05/U+FB06. Note
   the two relations are not interchangeable: U+0130 lowercases to `i` but does
   not fold with it, while U+212A does both. `TestEqualASCIIFold`,
@@ -94,9 +94,10 @@ These are the parts a change can silently break. Treat them as contracts.
   caller-constructed `*url.URL` reaches the scheme check with bytes `url.Parse`
   could never produce, which is why the scheme fold above has to be ASCII-exact.
 - **`isPublicAddr` unmaps first.** IPv4-mapped IPv6 (`::ffff:x.x.x.x`) is
-  unmapped before any prefix check, so IPv4 block ranges still apply.- **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
+  unmapped before any prefix check, so IPv4 block ranges still apply.
+- **IPv6 transition wrappers are unwrapped and re-validated.** 6to4
   (`2002::/16`), NAT64 well-known (`64:ff9b::/96`), Teredo (`2001::/32`; server
-  IPv4 in bytes 4–7 and client IPv4 XOR-inverted in bytes 12–15, both
+  IPv4 in bytes 4-7 and client IPv4 XOR-inverted in bytes 12-15, both
   validated), and IPv4-compatible (`::/96`) all extract the embedded IPv4 and
   recurse through `isPublicAddr`. NAT64-local
   (`64:ff9b:1::/48`) is blocked outright rather than unwrapped, because its
@@ -135,8 +136,8 @@ golangci-lint fmt
 Property-based and fuzz tests enforce correctness here; extend them when you
 touch validation logic.
 
-- Property test (`pgregory.net/rapid`): `TestValidateURL_properties` in
-  `ssrf_prop_test.go`. Runs as part of `go test ./...`.
+- Property tests (`pgregory.net/rapid`): `ssrf_prop_test.go`. They run as part
+  of `go test ./...`.
 - Fuzz targets in `ssrf_fuzz_test.go`, each with an independent oracle
   (the fuzz tests re-derive blocked ranges separately from the implementation
   so a regression in `ssrf.go` is caught against a second source of truth):
