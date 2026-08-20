@@ -19,6 +19,14 @@ func FuzzValidateURL(f *testing.F) {
 	f.Add("https://172.16.0.1")
 	f.Add("https://[fc00::1]")
 	f.Add("ftp://example.com")
+	// Case-folding launderings of the host and the scheme. Both comparisons
+	// fold over ASCII, so neither may admit a rune RFC 1035 / RFC 3986 exclude.
+	f.Add("https://localho\u017ft/x")
+	f.Add("http\u017f://example.com/x")
+	f.Add("\u212Aafka://example.com/x")
+	f.Add("https://\u0130nternal/x")
+	f.Add("https://\uFB05.example/x")
+	f.Add("https://\uFB06.example/x")
 	f.Fuzz(func(t *testing.T, raw string) {
 		err := ValidateURL(raw)
 
@@ -356,6 +364,20 @@ func FuzzIsPublicHost(f *testing.F) {
 	f.Add("100.63.255.255") // just below CGNAT (public)
 	f.Add("8.8.8.8")        // public canonical IPv4
 	f.Add("2606:4700::1")   // public canonical IPv6
+	// Case-folding launderings. The host comparison folds over ASCII
+	// (equalASCIIFold), so none of these may reach a verdict a plain byte
+	// comparison would not. The committed corpus carried none of them.
+	f.Add("localho\u017ft")   // U+017F folds with 's' under strings.EqualFold
+	f.Add("LOCALHO\u017fT")   // ...in the uppercase spelling too
+	f.Add("\u0130nternal")    // U+0130 lowercases to 'i' but does not fold with it
+	f.Add("\u212Aelvin.test") // U+212A lowercases AND folds with 'k'
+	// The three pairs whose SimpleFold changed between Unicode 15 and 17.
+	f.Add("\u0390.example")
+	f.Add("\u1FD3.example")
+	f.Add("\u03B0.example")
+	f.Add("\u1FE3.example")
+	f.Add("\uFB05.example")
+	f.Add("\uFB06.example")
 	f.Fuzz(func(t *testing.T, host string) {
 		hostOk := IsPublicHost(host)
 		if !hostOk {
