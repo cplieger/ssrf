@@ -286,8 +286,7 @@ func TestURLPolicyValidate_rejects_disallowed(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for http when only https allowed")
 	}
-	var ssrfError *Error
-	if !errors.As(err, &ssrfError) || ssrfError.Kind != KindBadScheme {
+	if ssrfError, ok := errors.AsType[*Error](err); !ok || ssrfError.Kind != KindBadScheme {
 		t.Errorf("expected KindBadScheme, got %v", err)
 	}
 }

@@ -119,8 +119,8 @@ func TestSafeTransport_custom_policy_denial_kind(t *testing.T) {
 	denyAll := func(_ netip.Addr) bool { return false }
 	tr := SafeTransport(WithAddressPolicy(denyAll))
 	_, err := tr.DialContext(t.Context(), "tcp", "1.1.1.1:443")
-	var ssrfError *Error
-	if !errors.As(err, &ssrfError) {
+	ssrfError, ok := errors.AsType[*Error](err)
+	if !ok {
 		t.Fatalf("DialContext() error = %v, want *ssrf.Error", err)
 	}
 	if ssrfError.Kind != KindPolicyDenied {
@@ -134,8 +134,8 @@ func TestSafeTransport_default_policy_denial_kind(t *testing.T) {
 	t.Parallel()
 	tr := SafeTransport()
 	_, err := tr.DialContext(t.Context(), "tcp", "10.0.0.1:443")
-	var ssrfError *Error
-	if !errors.As(err, &ssrfError) {
+	ssrfError, ok := errors.AsType[*Error](err)
+	if !ok {
 		t.Fatalf("DialContext() error = %v, want *ssrf.Error", err)
 	}
 	if ssrfError.Kind != KindNonPublicIP {
@@ -377,8 +377,7 @@ func TestUnparseablePortIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("dial to an unparseable port succeeded, want it refused")
 	}
-	var se *Error
-	if !errors.As(err, &se) || se.Kind != KindBadPort {
+	if se, ok := errors.AsType[*Error](err); !ok || se.Kind != KindBadPort {
 		t.Errorf("error = %v, want a KindBadPort *Error", err)
 	}
 }
