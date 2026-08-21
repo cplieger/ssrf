@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787320851899,
-  "repoUrl": "https://github.com/cplieger/ssrf",
+  "lastUpdate": 1787321657038,
+  "repoUrl": "https://github.com/cplieger/ci",
   "entries": {
     "Benchmark": [
       {
@@ -1346,6 +1346,343 @@ window.BENCHMARK_DATA = {
             "name": "BenchmarkValidateURL_PublicHTTPS",
             "value": 426.5,
             "range": "± 33",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Christopher Plieger",
+            "username": "cplieger",
+            "email": "917744+cplieger@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "d6d1f597c73f03c468c3df3152caa5ac0534a3bb",
+          "message": "chore(deps): update cplieger/ci digest to 8de9bc8 (#500)",
+          "timestamp": "2026-08-21T14:03:38Z",
+          "url": "https://github.com/cplieger/ci/commit/d6d1f597c73f03c468c3df3152caa5ac0534a3bb"
+        },
+        "date": 1787321656744,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "BenchmarkIsPublicAddr_6to4Embed - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_6to4Embed - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_6to4Embed",
+            "value": 120.15,
+            "range": "± 1.9",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_CGNAT - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_CGNAT - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_CGNAT",
+            "value": 23.205,
+            "range": "± 0.35",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_IPv4Mapped - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_IPv4Mapped - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_IPv4Mapped",
+            "value": 10.835,
+            "range": "± 0.26",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_Loopback - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_Loopback - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_Loopback",
+            "value": 7.4405,
+            "range": "± 0.322",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PrivateIPv4 - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PrivateIPv4 - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PrivateIPv4",
+            "value": 10.24,
+            "range": "± 0.26",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv4 - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv4 - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv4",
+            "value": 86.51,
+            "range": "± 4.58",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv6 - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv6 - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv6",
+            "value": 89.96,
+            "range": "± 0.94",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_BareHostname - B/op",
+            "value": 368,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_BareHostname - allocs/op",
+            "value": 8,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_BareHostname",
+            "value": 4300,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_DottedHostname - B/op",
+            "value": 240,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_DottedHostname - allocs/op",
+            "value": 3,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_DottedHostname",
+            "value": 464.55,
+            "range": "± 43.7",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_Localhost - B/op",
+            "value": 240,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_Localhost - allocs/op",
+            "value": 4,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_Localhost",
+            "value": 3790,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PrivateIP - B/op",
+            "value": 304,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PrivateIP - allocs/op",
+            "value": 6,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PrivateIP",
+            "value": 4077,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PublicIP - B/op",
+            "value": 144,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_PublicIP - allocs/op",
+            "value": 1,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_PublicIP",
+            "value": 414.3,
+            "range": "± 9.5",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateURL_BadScheme - B/op",
+            "value": 288,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_BadScheme - allocs/op",
+            "value": 5,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_BadScheme",
+            "value": 4018,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_IPv4MappedBlocked - B/op",
+            "value": 344,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_IPv4MappedBlocked - allocs/op",
+            "value": 7,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_IPv4MappedBlocked",
+            "value": 4661,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_LoopbackBlocked - B/op",
+            "value": 304,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_LoopbackBlocked - allocs/op",
+            "value": 6,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_LoopbackBlocked",
+            "value": 4211,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PrivateBlocked - B/op",
+            "value": 304,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PrivateBlocked - allocs/op",
+            "value": 6,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PrivateBlocked",
+            "value": 4250,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PublicHTTPS - B/op",
+            "value": 144,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateURL_PublicHTTPS - allocs/op",
+            "value": 1,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateURL_PublicHTTPS",
+            "value": 498.3,
+            "range": "± 38.2",
             "unit": "ns/op",
             "extra": "10 samples, median"
           }
