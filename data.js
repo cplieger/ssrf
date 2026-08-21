@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787315427228,
+  "lastUpdate": 1787316747654,
   "repoUrl": "https://github.com/cplieger/ci",
   "entries": {
     "Benchmark": [
@@ -672,6 +672,343 @@ window.BENCHMARK_DATA = {
             "name": "BenchmarkValidateURL_PublicHTTPS",
             "value": 342.4,
             "range": "± 32.4",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "cplieger",
+            "username": "cplieger",
+            "email": "917744+cplieger@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "Christopher Plieger",
+            "username": "cplieger",
+            "email": "917744+cplieger@users.noreply.github.com"
+          },
+          "id": "a913658336765dccfffa3e1978b47a61cb869534",
+          "message": "fix: attribute benchmark data to the commit that was benchmarked\n\nThe benchmark action stamps every data point with a cplieger/ci commit, because it resolves the repo it acts on from github.context.repo and this workflow runs in ci while measuring a consumer. A chart whose points link to ci cannot attribute a regression to the change that caused it, which is the only reason the tracker exists.\n\nRepairs the record after publishing instead of trying to redirect the action. Overriding GITHUB_REPOSITORY was tried first and cannot work, because GitHub reserves the default GITHUB_* variables and the runner value wins at process level. bench-fix-attribution.py rewrites the entry the run just appended, taking real commit metadata from the consumer own API response and mirroring the shape the action builds itself, and it also corrects the chart repoUrl.\n\nIt refuses to write unless the file is exactly the action format and the newest entry carries this run ci SHA, so a future format change fails the leg loudly rather than corrupting the series. Its round-trip is byte-identical against all four published files, so a run that changes nothing produces no commit.\n\nAlert comments are turned off and the job summary turned on. That target is resolved from context at API-call time, so unlike the data point it cannot be repaired afterwards, and a comment about a consumer regression would be filed on a cplieger/ci commit where it is both misfiled and unread.",
+          "timestamp": "2026-08-21T12:40:16Z",
+          "url": "https://github.com/cplieger/ci/commit/a913658336765dccfffa3e1978b47a61cb869534"
+        },
+        "date": 1787316747320,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "BenchmarkIsPublicAddr_6to4Embed - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_6to4Embed - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_6to4Embed",
+            "value": 114.45,
+            "range": "± 3.8",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_CGNAT - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_CGNAT - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_CGNAT",
+            "value": 20.84,
+            "range": "± 0.29",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_IPv4Mapped - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_IPv4Mapped - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_IPv4Mapped",
+            "value": 10.06,
+            "range": "± 0.671",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_Loopback - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_Loopback - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_Loopback",
+            "value": 6.6905,
+            "range": "± 0.437",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PrivateIPv4 - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PrivateIPv4 - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PrivateIPv4",
+            "value": 9.6735,
+            "range": "± 0.673",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv4 - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv4 - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv4",
+            "value": 82.02,
+            "range": "± 6.17",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv6 - B/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv6 - allocs/op",
+            "value": 0,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkIsPublicAddr_PublicIPv6",
+            "value": 82.15,
+            "range": "± 1.16",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_BareHostname - B/op",
+            "value": 368,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_BareHostname - allocs/op",
+            "value": 8,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_BareHostname",
+            "value": 4211,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_DottedHostname - B/op",
+            "value": 240,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_DottedHostname - allocs/op",
+            "value": 3,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_DottedHostname",
+            "value": 429.15,
+            "range": "± 37.2",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_Localhost - B/op",
+            "value": 240,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_Localhost - allocs/op",
+            "value": 4,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_Localhost",
+            "value": 3767,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PrivateIP - B/op",
+            "value": 304,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PrivateIP - allocs/op",
+            "value": 6,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PrivateIP",
+            "value": 4161,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateHost_PublicIP - B/op",
+            "value": 144,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_PublicIP - allocs/op",
+            "value": 1,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateHost_PublicIP",
+            "value": 360.8,
+            "range": "± 2.4",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateURL_BadScheme - B/op",
+            "value": 288,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_BadScheme - allocs/op",
+            "value": 5,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_BadScheme",
+            "value": 3815,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_IPv4MappedBlocked - B/op",
+            "value": 344,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_IPv4MappedBlocked - allocs/op",
+            "value": 7,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_IPv4MappedBlocked",
+            "value": 4943,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_LoopbackBlocked - B/op",
+            "value": 304,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_LoopbackBlocked - allocs/op",
+            "value": 6,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_LoopbackBlocked",
+            "value": 4196,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PrivateBlocked - B/op",
+            "value": 304,
+            "unit": "B/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PrivateBlocked - allocs/op",
+            "value": 6,
+            "unit": "allocs/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PrivateBlocked",
+            "value": 4568,
+            "unit": "ns/op"
+          },
+          {
+            "name": "BenchmarkValidateURL_PublicHTTPS - B/op",
+            "value": 144,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateURL_PublicHTTPS - allocs/op",
+            "value": 1,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkValidateURL_PublicHTTPS",
+            "value": 457.85,
+            "range": "± 26.5",
             "unit": "ns/op",
             "extra": "10 samples, median"
           }
