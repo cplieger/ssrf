@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1787320851899,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/ssrf",
   "entries": {
     "Benchmark": [
       {
@@ -1017,19 +1017,19 @@ window.BENCHMARK_DATA = {
       {
         "commit": {
           "author": {
-            "name": "cplieger",
-            "username": "cplieger",
-            "email": "917744+cplieger@users.noreply.github.com"
-          },
-          "committer": {
             "name": "Christopher Plieger",
             "username": "cplieger",
             "email": "917744+cplieger@users.noreply.github.com"
           },
-          "id": "60782436f76f61656d95b748ea223378319092ef",
-          "message": "feat: open a benchmark regression tracker issue in each consumer\n\nweekly-bench measured benchmarks and reported a regression only into a job summary nobody opens. Its four sibling weekly workflows all surface findings as a per-repo tracker issue, and that is the difference between a tracker that is correct and one that is noticed. The action own alert comment cannot fill the gap: it resolves the repo to comment on from github.context.repo, which is cplieger/ci under this design and is not overridable, so it was turned off.\n\nUses the tracker shape (one permanent issue, body rewritten in place, sentinel regions, free-form notes preserved) rather than the per-finding shape. A fuzz finding is a discrete defect closed by committing the seed that proves the fix; a benchmark is a continuous series with no such artifact, it re-measures to a different value every week, and hash-keyed titles have already been shown to mint duplicate issues for one defect. Nothing here would ever auto-close, and closing would orphan the history because the sentinel query only matches open issues.\n\nThresholds are per metric, because the metrics are not alike. Wall clock keeps the loose 1.5x the workflow already configures, since runner amplitude is 10-20% and the target is an algorithmic regression. Allocation counts are counted rather than timed, so they get 1.05x, and crossing from zero to non-zero is called out on its own: an allocation-free path that starts allocating is the regression these libraries exist to prevent, and 1.5x would hide it completely.\n\nReads each consumer benchmarks branch instead of run artifacts, because unlike mutation reports the series is already stored durably. So the trend table is regenerated from the data every week rather than rolled forward from its own rendered markdown, which is how the stryker tracker once fused two table columns.",
-          "timestamp": "2026-08-21T13:45:35Z",
-          "url": "https://github.com/cplieger/ci/commit/60782436f76f61656d95b748ea223378319092ef"
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "f8a17f98b829fcaa53b48491da5efc040724552d",
+          "message": "chore(sync): synced file(s) with cplieger/ci (#368)\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>",
+          "timestamp": "2026-08-21T13:17:29Z",
+          "url": "https://github.com/cplieger/ssrf/commit/f8a17f98b829fcaa53b48491da5efc040724552d"
         },
         "date": 1787320851000,
         "tool": "customSmallerIsBetter",
