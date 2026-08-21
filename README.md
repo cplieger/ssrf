@@ -9,7 +9,7 @@
 
 > URL validation to prevent server-side request forgery (SSRF)
 
-Go library that validates URLs and IP addresses against SSRF attacks. Rejects private, loopback, link-local, and CGNAT addresses, enforces HTTPS (configurable), and detects IPv6 transition-mechanism bypasses (6to4, NAT64, Teredo, IPv4-compatible). Ships a hardened HTTP transport whose DNS-rebinding defense validates twice: once at resolution and again via a `net.Dialer.Control` hook at socket creation. Standard library only (test-only dependency on pgregory.net/rapid for property-based testing).
+Go library that validates URLs and IP addresses against SSRF attacks. Rejects private, loopback, link-local, and CGNAT addresses, enforces HTTPS (configurable), and detects IPv6 transition-mechanism bypasses (6to4, NAT64, Teredo, IPv4-compatible). Ships a hardened HTTP transport whose DNS-rebinding defense validates twice: once at resolution and again via a `net.Dialer.Control` hook at socket creation. Standard library plus one first-party dependency ([runesafe](https://github.com/cplieger/runesafe), which bounds and sanitizes the untrusted text that reaches a log attribute); the test-only dependency is pgregory.net/rapid for property-based testing.
 
 ## Install
 
@@ -89,6 +89,37 @@ judge the host as written. A public-looking name that resolves to an internal
 address passes them. Pair them with `SafeTransport`, which validates the
 resolved IP and again the connected IP at dial time.
 
+### What counts as a host
+
+The host check is an allowlist, not a blocklist: a host is accepted only if it is
+one of two things, and everything else is refused with `KindInvalidHost`.
+
+- An IP literal `netip.ParseAddr` accepts, carrying **no zone identifier**. A
+  zone scopes an address to one interface, so it is meaningless on a global
+  address; the WHATWG URL Standard omits zone support from host parsing for the
+  same reason.
+- A DNS name: at most 253 bytes, two or more labels, each label 1 to 63 bytes of
+  ASCII letters, digits, hyphen or underscore, not beginning or ending with a
+  hyphen, optionally with one trailing root dot. A name whose rightmost label is
+  numeric is treated as an IPv4 address rather than a domain, per WHATWG's
+  [ends in a number](https://url.spec.whatwg.org/#ends-in-a-number-checker)
+  rule, which is what refuses `0177.0.0.1`, `0x7f.0.0.1`, `127.1` and
+  `192.168.257`.
+
+**Why an allowlist.** Standard IDNA processing rewrites some hosts into others.
+UTS-46 deletes format characters such as U+200B ZERO WIDTH SPACE and U+00AD SOFT
+HYPHEN, so `169.254.169.254\u200b` becomes the cloud metadata address; and it maps
+fullwidth and circled digits to ASCII, so `１６９.254.169.254` becomes the same
+thing. A blocklist would have to enumerate those runes and would lose to the next
+one added; refusing every byte outside the label set closes the whole class.
+
+**Two consequences worth knowing.** Non-ASCII hosts are refused rather than
+converted, so convert an internationalized name to its `xn--` A-label before
+validating; ssrf will not guess, because a validator that canonicalizes
+differently from your HTTP client is how bypasses happen. And bracketed authority
+syntax (`[::1]`) is refused, because these functions take a host: use
+`url.Hostname()` or `net.SplitHostPort` first. `ValidateURL` already does.
+
 Scheme and host matching is case-insensitive over ASCII and byte-exact outside
 it, which is the whole of the RFC 3986 scheme grammar and the RFC 1035 hostname
 grammar (an internationalized name arrives as an `xn--` A-label). Folding wider
@@ -126,10 +157,19 @@ All errors returned by `ValidateURL`, `SafeTransport`'s dial function, and the r
 | `KindPolicyDenied`     | Custom policy rejected the IP         |
 | `KindBadPort`          | Port is not in the allowed set        |
 | `KindTooManyRedirects` | Redirect chain exceeded the hop limit |
+| `KindInvalidHost`      | Not a canonical host at all           |
 
 When a redirect is blocked because the target URL failed validation, the policy
 propagates the underlying `Kind` (e.g. `KindBadScheme`), so `errors.As(&ssrf.Error)`
 on a `CheckRedirect` error reports the real reason rather than a blanket value.
+
+`KindInvalidHost` and `KindNonPublicIP` answer different questions, and the
+difference decides your remedy. `KindNonPublicIP` means a well-formed host that
+points somewhere private, so the URL is the problem. `KindInvalidHost` means the
+string is not a host: a non-ASCII or otherwise illegal byte, bracketed authority
+syntax, an oversized name or label, or an IP literal carrying a zone identifier.
+For that one, normalize your input (an `xn--` A-label, `url.Hostname()`) rather
+than looking for a different destination.
 
 ### Defense-in-Depth: Dialer.Control Hook
 
@@ -140,7 +180,26 @@ The transport uses **two layers** of IP validation:
 
 ### Logging
 
-The library logs through `log/slog`'s default logger (`slog.Default()`); there is no logger to inject. Each enforcement rejection emits a single `Warn` line (`ssrf blocked`, `ssrf dial blocked`, `ssrf control blocked`, `ssrf redirect blocked`) with a bounded snake_case `reason` attribute (`non_public_ip`, `bad_port`, `too_many_redirects`, and so on) suitable for dashboard aggregation by reason. `IsPublicHost` is a silent predicate: it returns the same allow/deny decision as the enforcement path but emits no log, so you can pre-filter hosts without generating spurious `ssrf blocked` events.
+**Validation does not log.** `ValidateURL`, `URLPolicy.Validate` and `IsPublicHost` return their verdict and nothing else: the returned `*Error` carries `Kind`, `Host`, `Msg` and `Err`, so you already hold everything a log line could say, and whether to record it is your decision, at your level, through your logger. A validator that wrote to a global sink you cannot see or silence would be making that decision for you.
+
+**The transport logs, because you cannot see its refusals otherwise.** The dial path, the `Control` hook and the redirect policy run inside `net/http`, where a rejection can be retried or wrapped past recognition before it reaches you. Each emits a single `Warn` (`ssrf dial blocked`, `ssrf control blocked`, `ssrf redirect blocked`) through `log/slog`'s default logger, with a bounded snake_case `reason` attribute (`non_public_ip`, `bad_port`, `too_many_redirects`, and so on) suitable for dashboard aggregation. There is no logger to inject.
+
+Every untrusted value in those lines is sanitized and length-bounded first. A host, address, URL or port you pass in is attacker-influenced by definition — that is what an SSRF guard is for — and `slog`'s JSONHandler escapes only what JSON requires, so C1 controls, Unicode bidi controls and U+2028/U+2029 would otherwise reach your log pipeline intact. Each value is capped at the longest legal length for its kind (253 bytes for a host, the maximum DNS name, so a real host is never truncated), which also stops one refusal writing an attacker-sized record.
+
+If you want a rejected host in your own logs, take it from the error rather than the log line:
+
+```go
+if err := ssrf.ValidateURL(raw); err != nil {
+    var serr *ssrf.Error
+    if errors.As(err, &serr) {
+        // serr.Host is the RAW host, for matching and dedupe. Sanitize it
+        // before it reaches a log sink or a rendered page: runesafe.
+        slog.Warn("refused an outbound URL",
+            "host", runesafe.SanitizeSingleLineBounded(serr.Host, 253),
+            "kind", serr.Kind)
+    }
+}
+```
 
 ### Blocked IP Ranges
 

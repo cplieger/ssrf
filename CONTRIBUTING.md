@@ -56,18 +56,47 @@ These are the parts a change can silently break. Treat them as contracts.
   unpredictable port passes that port once it is known; the reference
   implementation this library mirrors
   (`doyensec/safeurl`) likewise ships no escape hatch.
-- **`IsPublicHost` is a silent predicate; only enforcement logs.**
-  `IsPublicHost` and the enforcement path share one classification core
-  (`hostValidationError`), but only the enforcement wrapper
-  (`validateURLWithSchemes`, reached via `ValidateURL`) emits a `slog.Warn`; the
-  redirect policy re-validates each hop through the silent core
-  (`classifyURL`) and emits its own single `ssrf redirect blocked`
-  line. Keep `IsPublicHost` log-free so callers can probe host publicness
-  without polluting block dashboards. All logging goes through `slog.Default()` (there
-  is no per-instance logger option), and every block log carries a bounded
-  snake_case `reason` from `reasonLabel(ErrorKind)`; never put a host or IP in
-  the `reason` attribute (use the `error` key for detail) or block-dashboard
-  cardinality blows up.
+- **The host check is an ALLOWLIST with no permissive exit.** `canonicalHostError`
+  accepts only a zone-free IP literal or a canonical ASCII DNS name and refuses
+  everything else. Do not reintroduce a fallthrough that accepts a host because
+  it merely looks name-shaped: the arm this replaced ("contains a dot, therefore
+  a public hostname") was the root cause of six separate bypasses, the last two
+  of which reached the cloud metadata address through nothing more exotic than
+  standard IDNA processing. When you add a recognizer, ask first whether the
+  allowlist should have covered it.
+- **A new byte is never added to `isHostLabelByte` without a resolution
+  argument.** The set is ASCII letters, digits, hyphen and underscore. Underscore
+  is in deliberately: refusing it has no security value, and a Go consumer can
+  genuinely reach such a host (measured, `net.Resolver` puts `a_b.example.com` on
+  the wire, while it refuses a U-label before sending anything). That measurement,
+  not taste, is the bar for any addition.
+- **`endsInNumber` implements WHATWG's rule verbatim; do not "simplify" it.**
+  Two details look wrong and are not: bare `0x` counts as a number (the spec says
+  "zero or more ASCII hex digits"), and a digit-leading label that is not fully
+  numeric does not (which keeps a private zone like `svc.3internal` usable). A
+  stricter "must begin with a letter" rule was measured against every dangerous
+  input, found identical, and rejected for costing compatibility with no gain.
+- **The root-dot strip must stay ahead of the `localhost` fold** in
+  `normalizeHostForValidation`, or `localhost.` degrades from `KindLocalhost` to a
+  generic refusal. A trailing dot also disables resolver search-list suffixing,
+  which makes the dotted spelling the safer one, so it is accepted rather than
+  refused.
+- **The gate is SYNTACTIC and the docs must keep saying so.**
+  `metadata.google.internal`, `metadata.goog` and `a.localhost` all pass it and
+  all resolve to private addresses. Only `SafeTransport`'s post-resolution checks
+  stop them. `TestCanonicalHostGate_isSyntacticOnly` pins this deliberately, so if
+  it ever starts failing, the README's claim is stale and both must change together.
+- **The whole validation path is log-free; only the transport paths log.**
+  `IsPublicHost`, `ValidateURL` and `URLPolicy.Validate` share one classification
+  core (`hostValidationError`) and none of them emits a line: validation computes
+  a verdict, returns it in a fully described `*Error`, and leaves recording it to
+  the caller. The transport paths are the exception, and they earn it by
+  position: a dial, `Control` or redirect refusal happens inside `net/http`,
+  where the error can be retried or wrapped past recognition before any caller
+  sees it. Each emits one `Warn` through `slog.Default()` (there is no
+  per-instance logger option) carrying a bounded snake_case `reason` from
+  `reasonLabel(ErrorKind)`. Never put a host or IP in the `reason` attribute (use
+  the `error` key for detail) or block-dashboard cardinality blows up.
 - **Every case comparison folds over ASCII, never Unicode.** The host check
   against `localhost` uses `equalASCIIFold` and the scheme lookup canonicalizes
   through `lowerASCIIString`; neither uses `strings.EqualFold` or
@@ -107,8 +136,21 @@ These are the parts a change can silently break. Treat them as contracts.
   implementing a documented non-goal (hostname allowlists, Happy Eyeballs,
   response size limits, a blanket `2001::/23` block), needs explicit
   discussion first.
-- **Stdlib-only for non-test code.** The only dependency in `go.mod` is the
-  test-only `pgregory.net/rapid`. Keep it that way.
+- **Stdlib plus one first-party dependency for non-test code.** `go.mod` carries
+  `github.com/cplieger/runesafe` (the fleet's rune-safety policy for untrusted
+  text headed to a log sink) and the test-only `pgregory.net/rapid`. Keep it
+  that way: a third dependency needs discussion first.
+- **Every untrusted string in a log attribute goes through a `*ForLog` helper.**
+  `hostForLog`, `addrForLog`, `urlForLog`, `portForLog` and `errTextForLog` hold
+  one bound per attribute key, so a new log site cannot pick a different one by
+  accident and the invariant stays greppable. `network` is the single audited
+  exception, documented at its call site, because `net/http` supplies it from
+  its own constants. Do not call `runesafe` directly from a log site, and do not
+  add a bound at a call site.
+- **The validation path must stay silent.** `ValidateURL`, `URLPolicy.Validate`
+  and `IsPublicHost` return their verdict and log nothing; only the transport
+  paths, whose refusals happen inside `net/http`, emit a line.
+  `TestValidationPathIsSilent` fails if that changes.
 
 ## Local development
 

@@ -47,8 +47,8 @@ import (
 //     split's slice grows in BYTES while the count does not move.
 //   - ValidateURL is flat in the URL's size on every class measured: 3
 //     allocations for an accepted hostname, 1 for an accepted IP literal (the
-//     *url.URL itself), 6 refusing a private IP, 7 refusing a mapped metadata
-//     address, 5 refusing a scheme and 4 refusing localhost — each unchanged
+//     *url.URL itself), 4 refusing a private IP, 5 refusing a mapped metadata
+//     address, 4 refusing a scheme and 2 refusing localhost — each unchanged
 //     from a 16-byte path to a 64 KiB one.
 //   - Validating a resolver's answer costs a constant 5 allocations whether the
 //     resolver returned 1 address or 512, and refusing a poisoned answer costs a
@@ -56,23 +56,30 @@ import (
 //     answering with more addresses, and it makes no difference whether the
 //     poisoned address arrives first or last.
 //   - Refusal is consistently MORE expensive than acceptance here: 0 -> 7 in the
-//     Control hook, 5 -> 14 in the dial path, 3 -> 6 in ValidateURL, 2 -> 9 in
+//     Control hook, 5 -> 14 in the dial path, 3 -> 4 in ValidateURL, 2 -> 9 in
 //     the redirect policy. The asymmetry is inherent to returning a structured
-//     *Error and emitting one bounded Warn, and the refusal path is the one an
-//     attacker picks. So the property asserted below is not "refusal is as cheap
-//     as acceptance" — it is not — but "refusal is BOUNDED and does not track
-//     the attacker's payload".
+//     *Error, and the refusal path is the one an attacker picks. So the property
+//     asserted below is not "refusal is as cheap as acceptance" — it is not —
+//     but "refusal is BOUNDED and does not track the attacker's payload".
 //   - Two refusals do move with the payload, both logarithmically, and both are
 //     bounded rather than pinned. A rejected HOST is interpolated into the
-//     *Error message and the block log, which measures 8 allocations from a
-//     16-byte bare hostname through a 4 KiB one and 13 at 64 KiB. A rejected
-//     redirect HOP is worse in kind: the policy logs req.URL.Redacted(), so the
-//     whole URL is materialized, giving 9 through 4 KiB and 12 at 64 KiB with a
-//     byte cost proportional to what the far end sent. Both are fmt.Sprintf and
-//     the log handler doubling buffers, so the growth is logarithmic in the
-//     payload rather than proportional to it.
+//     *Error message, which measures 6 allocations for ValidateURL from a
+//     16-byte bare hostname through 4 KiB and 9 at 64 KiB (5 through 8 for
+//     IsPublicHost; a whitespace-padded host rejects earlier and stays flat at
+//     4). A rejected redirect HOP is worse in kind: the policy logs
+//     req.URL.Redacted(), so the whole URL is materialized, giving 9 through
+//     4 KiB and 10 at 64 KiB. Both are fmt.Sprintf and the log handler doubling
+//     buffers, so the growth is logarithmic in the payload rather than
+//     proportional to it.
+//   - Those two numbers moved when the logging changed, and the direction is the
+//     point. The validation path stopped logging (it returns the *Error and lets
+//     the caller decide), so a rejected host costs what building the message
+//     costs and nothing more: refusing a private IP went 6 -> 4 and localhost
+//     4 -> 2. The redirect hop is now bounded to maxURLLog before the handler
+//     ever sees it, so a 64 KiB hop stopped growing the handler's buffer: 12 -> 10.
+//     Sanitizing is not free, but bounding first paid for it.
 //   - The Control hook's malformed-address refusal has the same logarithmic shape
-//     (5 allocations at 16 bytes, 6 at 4 KiB, 11 at 64 KiB) and is deliberately
+//     (5 allocations at 16 bytes, 7 at 4 KiB, 9 at 64 KiB) and is deliberately
 //     NOT asserted: that address is built by this package from an
 //     already-validated IP literal, so its length is not a caller's to choose.
 //
@@ -310,14 +317,13 @@ var publicAddrClasses = map[string]netip.Addr{
 }
 
 // publicHostIPLiterals is the set of accepted IP-literal hosts, in the spellings
-// a caller actually hands IsPublicHost: bare, bracketed as URL authority
-// syntax, and each transition-mechanism wrapper whose embedded IPv4 is public.
+// a caller actually hands IsPublicHost. Bracketed authority syntax is NOT among
+// them: IsPublicHost takes a host, and a bracketed form is refused, so it cannot
+// witness the accept path this map feeds.
 var publicHostIPLiterals = map[string]string{
 	"bare_public_v4":         "93.184.216.34",
 	"bare_public_v6":         "2606:4700:4700::1111",
-	"bracketed_public_v6":    "[2606:4700:4700::1111]",
 	"mapped_public_v4":       "::ffff:93.184.216.34",
-	"bracketed_mapped_v4":    "[::ffff:93.184.216.34]",
 	"public_6to4_embed":      "2002:0808:0808::1",
 	"public_nat64_embed":     "64:ff9b::8.8.8.8",
 	"public_teredo":          "2001:0:4136:e378:8000:63bf:f7f7:f7f7",
@@ -350,6 +356,19 @@ var controlPorts = map[uint16]struct{}{443: {}, 8443: {}}
 // between rungs instead of standing still — well past any plausible measurement
 // noise, and AllocsPerRun's integer division absorbs the rest.
 var payloadLadder = []int{16, 256, 4096, 65536}
+
+// legalNameLadder and legalLabelLadder span the sizes an ACCEPTED host can take
+// under the canonical-host gate: a name at most maxDNSName bytes, a label at
+// most maxDNSLabel. They exist because the accept path can no longer be fed a
+// 64 KiB host, so an accept-path ladder that used payloadLadder would be
+// measuring a refusal and asserting it was an acceptance. Each still spans a
+// wide range (16 to 250 bytes, 8 to 63 bytes), which is what the flatness
+// property needs. The oversize rungs live in
+// TestOversizedHostRefusalIsConstant.
+var (
+	legalNameLadder  = []int{16, 64, 128, 250}
+	legalLabelLadder = []int{8, 16, 32, 63}
+)
 
 // resolverAnswerLadder is the number of addresses a hostile resolver answers
 // with. It spans maxDialIPs (8) in both directions on purpose: the dial cap must
@@ -390,14 +409,15 @@ const maxRefusalGrowth = 8
 // pinBlockLogger points slog.Default() at a real formatting handler writing to
 // io.Discard for the duration of the test.
 //
-// Two reasons it is not left at the ambient default. A rejection emits one Warn,
-// so measuring 100 runs against the default handler would write the 64 KiB
-// fixtures to stderr a hundred times. And the ambient handler is a consumer's
-// choice, so an assertion measured against it would be an assertion about
-// whatever the test binary inherited. A TextHandler still formats the record and
-// still grows its buffer, so a regression that starts allocating per log line
-// remains visible — that is the half a slog.DiscardHandler would hide, and it is
-// worth 3 allocations of difference at the 64 KiB rung.
+// Two reasons it is not left at the ambient default. The transport rejections
+// measured here emit one Warn each, so measuring 100 runs against the default
+// handler would write the 64 KiB fixtures to stderr a hundred times. And the
+// ambient handler is a consumer's choice, so an assertion measured against it
+// would be an assertion about whatever the test binary inherited. A TextHandler
+// still formats the record and still grows its buffer, so a regression that
+// starts allocating per log line remains visible — that is the half a
+// slog.DiscardHandler would hide, and it is worth 3 allocations of difference at
+// the 64 KiB rung.
 //
 // Restored through t.Cleanup rather than defer: a defer does not run on a
 // subtest's failure path, which would leak the discard handler into the rest of
@@ -463,8 +483,7 @@ func TestIsPublicAddrIsAllocationFree(t *testing.T) {
 // Bracketed spellings are in the table because they take a different route: the
 // bracket strip is a slice of the caller's string, so it must not become a
 // strings.Trim-and-copy. This is the pre-filter path a caller uses to sift a
-// list of hosts without emitting block logs, so it is the one most likely to run
-// in a loop.
+// list of hosts, so it is the one most likely to run in a loop.
 func TestIsPublicHostIsAllocationFreeForIPLiterals(t *testing.T) {
 	for class, host := range publicHostIPLiterals {
 		t.Run(class, func(t *testing.T) {
@@ -571,6 +590,7 @@ func TestValidateURLCostIsIndependentOfURLSize(t *testing.T) {
 
 	tests := map[string]struct {
 		build   func(n int) string
+		ladder  []int
 		blocked bool
 	}{
 		"accepts_public_hostname_with_long_path": {
@@ -579,16 +599,25 @@ func TestValidateURLCostIsIndependentOfURLSize(t *testing.T) {
 		"accepts_public_ip_with_long_query": {
 			build: func(n int) string { return "https://93.184.216.34/x?q=" + strings.Repeat("v", n) },
 		},
+		// These two grow the HOST rather than the path, so they run on the legal
+		// ladders: the canonical-host gate bounds an accepted name at
+		// maxDNSName and a label at maxDNSLabel, and a fixture past either
+		// bound would be measuring a refusal while asserting an acceptance.
 		"accepts_hostname_with_many_labels": {
-			build: func(n int) string { return "https://" + strings.Repeat("a.", n/2) + "com/x" },
+			build:  func(n int) string { return "https://" + strings.Repeat("a.", n/2) + "com/x" },
+			ladder: legalNameLadder,
 		},
 		"accepts_hostname_with_one_long_label": {
-			build: func(n int) string { return "https://" + strings.Repeat("d", n) + ".example.com/x" },
+			build:  func(n int) string { return "https://" + strings.Repeat("d", n) + ".example.com/x" },
+			ladder: legalLabelLadder,
 		},
 		"rejects_private_ip_with_long_path": {
 			build:   func(n int) string { return "https://10.0.0.1/" + strings.Repeat("p", n) },
 			blocked: true,
 		},
+		// Unbracketed: url.Hostname() strips the brackets a URL carries, and
+		// passing them here would measure the authority-syntax refusal rather
+		// than the mapped-metadata one this case is named for.
 		"rejects_mapped_metadata_ip_with_long_path": {
 			build: func(n int) string {
 				return "https://[::ffff:169.254.169.254]/" + strings.Repeat("p", n)
@@ -607,8 +636,12 @@ func TestValidateURLCostIsIndependentOfURLSize(t *testing.T) {
 
 	for class, tc := range tests {
 		t.Run(class, func(t *testing.T) {
+			ladder := tc.ladder
+			if ladder == nil {
+				ladder = payloadLadder
+			}
 			var counts []float64
-			for _, n := range payloadLadder {
+			for _, n := range ladder {
 				raw := tc.build(n)
 				if err := ValidateURL(raw); (err != nil) != tc.blocked {
 					t.Fatalf("ValidateURL(%s) error = %v, want blocked = %v: the "+
@@ -624,11 +657,11 @@ func TestValidateURLCostIsIndependentOfURLSize(t *testing.T) {
 					t.Errorf("ValidateURL allocated %v times per run at payload size "+
 						"%d bytes but %v at %d bytes, want at most %v more: validation "+
 						"cost must not scale with a URL an attacker supplies", got,
-						payloadLadder[i], counts[0], payloadLadder[0], float64(maxConstantDrift))
+						ladder[i], counts[0], ladder[0], float64(maxConstantDrift))
 				}
 			}
 			t.Logf("ValidateURL costs %v allocations across %d..%d bytes",
-				counts, payloadLadder[0], payloadLadder[len(payloadLadder)-1])
+				counts, ladder[0], ladder[len(ladder)-1])
 		})
 	}
 }
@@ -637,23 +670,40 @@ func TestValidateURLCostIsIndependentOfURLSize(t *testing.T) {
 // layer down, for the silent predicate.
 //
 // IsPublicHost is the entry point with no URL parsing in front of it, so this is
-// the classification cost on its own: a constant 2 allocations for an accepted
-// dotted hostname, from one label to 32768 and from a 16-byte label to a 64 KiB
-// one. Worth pinning separately from ValidateURL because it is documented as the
-// cheap pre-filter — the thing a caller runs over a whole list of hosts — and
-// because a per-label cost introduced here would be invisible in ValidateURL's
-// larger constant.
+// the classification cost on its own. Worth pinning separately from ValidateURL
+// because it is documented as the cheap pre-filter — the thing a caller runs
+// over a whole list of hosts — and because a per-label cost introduced here
+// would be invisible in ValidateURL's larger constant.
+//
+// The ladder stops at the grammar's bounds rather than running to 64 KiB. An
+// ACCEPTED host is now at most 253 bytes with labels at most 63, so a 64 KiB
+// host cannot witness the accept path at all; that input is a refusal, and
+// [TestOversizedHostRefusalIsConstant] measures it. The property is unchanged —
+// cost must not track the host — it is just measured over the range where
+// acceptance is reachable.
 func TestHostValidationCostIsIndependentOfHostSize(t *testing.T) {
-	tests := map[string]func(n int) string{
-		"many_labels":    func(n int) string { return strings.Repeat("a.", n/2) + "com" },
-		"one_long_label": func(n int) string { return strings.Repeat("d", n) + ".example.com" },
+	tests := map[string]struct {
+		build  func(n int) string
+		ladder []int
+	}{
+		// 250 bytes of "a." pairs plus "com" lands exactly on maxDNSName.
+		"many_labels": {
+			build:  func(n int) string { return strings.Repeat("a.", n/2) + "com" },
+			ladder: legalNameLadder,
+		},
+		// One label up to maxDNSLabel, so the ladder spans 8 to 63 bytes in a
+		// single label rather than growing the name.
+		"one_long_label": {
+			build:  func(n int) string { return strings.Repeat("d", n) + ".example.com" },
+			ladder: legalLabelLadder,
+		},
 	}
 
-	for class, build := range tests {
+	for class, tc := range tests {
 		t.Run(class, func(t *testing.T) {
 			var counts []float64
-			for _, n := range payloadLadder {
-				host := build(n)
+			for _, n := range tc.ladder {
+				host := tc.build(n)
 				if !IsPublicHost(host) {
 					t.Fatalf("IsPublicHost(%s) = false, want true: the fixture must "+
 						"witness the ACCEPT path to be measuring it", describeURL(host))
@@ -666,12 +716,12 @@ func TestHostValidationCostIsIndependentOfHostSize(t *testing.T) {
 				if got-counts[0] > maxConstantDrift {
 					t.Errorf("IsPublicHost allocated %v times per run at host size %d "+
 						"bytes but %v at %d bytes, want at most %v more: judging a host "+
-						"must not cost per label or per byte", got, payloadLadder[i],
-						counts[0], payloadLadder[0], float64(maxConstantDrift))
+						"must not cost per label or per byte", got, tc.ladder[i],
+						counts[0], tc.ladder[0], float64(maxConstantDrift))
 				}
 			}
 			t.Logf("IsPublicHost costs %v allocations across %d..%d bytes",
-				counts, payloadLadder[0], payloadLadder[len(payloadLadder)-1])
+				counts, tc.ladder[0], tc.ladder[len(tc.ladder)-1])
 		})
 	}
 }
@@ -681,25 +731,32 @@ func TestHostValidationCostIsIndependentOfHostSize(t *testing.T) {
 // definition the attacker's.
 //
 // Every rejection builds a *ssrf.Error carrying a message that interpolates the
-// offending host, and emits one Warn carrying it as an attribute. So a refusal
-// allocates, and unlike the classes above its count is not perfectly flat: the
-// measured shape is 8 allocations for ValidateURL from a 16-byte bare hostname
-// through a 4 KiB one, then 13 at 64 KiB, as fmt.Sprintf and the log handler
-// double their buffers. That is logarithmic in the payload.
+// offending host. So a refusal allocates, and unlike the classes above its count
+// is not perfectly flat: the measured shape is 6 allocations for ValidateURL
+// from a 16-byte bare hostname through a 4 KiB one, then 9 at 64 KiB, as
+// fmt.Sprintf doubles its buffer. That is logarithmic in the payload.
 //
 // Logarithmic is not amplification, and the distinction is the whole point of
 // the test. An attacker who can make a refusal a hundred times more expensive by
 // sending a hundred times more host has found an amplification vector inside the
-// SSRF guard. One who can add four allocations by sending four thousand times
+// SSRF guard. One who can add three allocations by sending four thousand times
 // more host has not. So the assertion is a ceiling plus a bound on GROWTH across
 // the ladder, rather than the equality the flat classes get.
 //
-// Byte volume does grow with the input — the error message contains the host,
-// and so does the log line — and this test deliberately does not gate that. A
-// consumer that logs a rejected host is choosing to write attacker-sized data to
-// its log sink; the library's job is to keep the WORK bounded, which is what the
-// count measures.
+// Byte volume still grows with the input HERE, because the error message
+// contains the host, and this test deliberately does not gate that: the *Error
+// goes to the caller, which chose to pass the host in and can bound it on the
+// way out. What changed is that the volume no longer reaches a log sink. This
+// path stopped logging entirely, and every attribute the transport paths do log
+// runs through a ForLog helper that caps it (hostForLog and friends), so the
+// library no longer writes attacker-sized data anywhere on its own initiative.
+// The count is still what this test measures, because keeping the WORK bounded
+// is the property an allocation ladder can hold.
 func TestRefusalCostDoesNotGrowWithTheHost(t *testing.T) {
+	// The validation path under test no longer logs, so the pinned handler is
+	// belt-and-braces here rather than load-bearing: it keeps the measurement
+	// honest if a log call is ever reintroduced, and TestValidationPathIsSilent
+	// is what actually fails in that case.
 	pinBlockLogger(t)
 
 	// Each builder returns a HOST that must be refused, so the rejected string
@@ -906,19 +963,21 @@ func TestRedirectPolicyAcceptedHopCostIsIndependentOfURLSize(t *testing.T) {
 // bounds it.
 //
 // The measurement is the reason this is a separate test from the accepted hop
-// above: refusing a hop costs a flat 9 allocations from 16 bytes through 4 KiB
-// and 12 at 64 KiB, where refusing the same host through ValidateURL is flat.
-// The difference is the log line. ValidateURL logs the HOST; the redirect policy
-// logs req.URL.Redacted(), which calls URL.String() and therefore materializes
-// the entire hop URL — path, query and all — into a fresh string on every
-// refusal.
+// above: refusing a hop costs 9 allocations from 16 bytes through 4 KiB and 10
+// at 64 KiB, where refusing the same host through ValidateURL is flat. The
+// difference is the log line. ValidateURL does not log at all; the redirect
+// policy logs req.URL.Redacted(), which calls URL.String() and therefore
+// materializes the entire hop URL — path, query and all — into a fresh string on
+// every refusal.
 //
-// That is a deliberate diagnostic (a blocked redirect is not diagnosable from
-// the host alone, since the chain is the interesting part), and the allocation
-// COUNT stays bounded, which is what this asserts. The BYTE cost is genuinely
-// proportional to the URL the far end sent, and this test does not gate that:
-// the caller who wants a bound there bounds its own log sink. Recorded here so
-// the next reader does not mistake the flat count for a flat cost.
+// That is a deliberate diagnostic: a blocked redirect is not diagnosable from
+// the host alone, since the chain is the interesting part. The allocation COUNT
+// stays bounded, which is what this asserts, and the BYTE cost is now bounded
+// too — urlForLog caps the attribute at maxURLLog, which is why the 64 KiB rung
+// costs 10 rather than the 12 it cost when the whole URL reached the handler.
+// What is still proportional to the far end's URL is the Redacted() string
+// itself, built before the cap can apply; bounding that would mean not logging
+// the URL at all, and the diagnostic is worth one materialization.
 func TestRedirectRefusalCostDoesNotGrowWithTheHopURL(t *testing.T) {
 	pinBlockLogger(t)
 

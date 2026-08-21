@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/runesafe/v2"
 )
 
 func TestValidateURL(t *testing.T) {
@@ -147,22 +149,29 @@ func TestIsPublicHost(t *testing.T) {
 		{"IPv4-mapped private", "::ffff:10.0.0.1", false},
 		{"CGNAT", "100.64.0.1", false},
 
-		// Bracketed URL-authority IPv6 syntax (l-f1): IsPublicHost mirrors
-		// url.Hostname() bracket-stripping, so a bracketed IPv4-mapped/embedded
-		// internal literal is rejected while a genuinely public bracketed IPv6
-		// literal still passes — staying consistent with ValidateURL.
+		// Bracketed URL-authority IPv6 syntax. IsPublicHost takes a HOST, not a
+		// URL authority, so every bracketed form is now refused rather than
+		// silently reinterpreted. This is a deliberate behavior change: the
+		// bracket-strip it replaced was the shape that bypassed smokescreen's
+		// deny list (CVE-2022-29188), and ValidateURL never reaches here with
+		// brackets because url.Hostname() removes them first. A direct caller
+		// passing raw authority syntax uses url.Hostname or net.SplitHostPort.
 		{"bracketed IPv4-mapped private rejected", "[::ffff:192.168.1.1]", false},
 		{"bracketed IPv4-mapped loopback rejected", "[::ffff:127.0.0.1]", false},
 		{"bracketed embedded-IPv4 documentation rejected", "[2001:db8::1.2.3.4]", false},
-		{"bracketed public IPv6 accepted", "[2606:4700:4700::1111]", true},
+		{"bracketed public IPv6 rejected as authority syntax", "[2606:4700:4700::1111]", false},
 
-		// Trailing-dot-after-bracket bypass (h-f1): a trailing FQDN dot after
-		// the closing bracket must not defeat the bracket-strip guard and let a
-		// bracketed internal literal fall through as PUBLIC.
+		// The same, with a trailing dot. Previously these needed a dedicated
+		// double-trim guard so a dot after the closing bracket could not defeat
+		// the bracket strip; refusing brackets outright retires that guard.
 		{"bracketed IPv4-mapped private trailing dot rejected", "[::ffff:192.168.1.1].", false},
 		{"bracketed IPv4-mapped loopback trailing dot rejected", "[::ffff:127.0.0.1].", false},
 		{"bracketed IPv4-mapped private double trailing dot rejected", "[::ffff:10.0.0.1]..", false},
-		{"bracketed public IPv6 trailing dot accepted", "[2606:4700:4700::1111].", true},
+		{"bracketed public IPv6 trailing dot rejected", "[2606:4700:4700::1111].", false},
+
+		// The unbracketed literals the bracketed forms above used to reach.
+		{"unbracketed public IPv6 accepted", "2606:4700:4700::1111", true},
+		{"unbracketed public IPv6 trailing dot accepted", "2606:4700:4700::1111.", true},
 
 		// RFC 6890 this-host block beyond IsUnspecified.
 		{"this-host 0.1.2.3", "0.1.2.3", false},
@@ -253,7 +262,16 @@ func TestValidateURL_rejects_noncanonical_ipv4(t *testing.T) {
 	}
 }
 
-func TestIsNumericLabel(t *testing.T) {
+// endsInNumber implements WHATWG's "ends in a number" checker, which decides
+// whether a name's rightmost label makes the whole name an IPv4 address rather
+// than a domain. It replaced isNumericLabel, whose cases are carried over here.
+//
+// The two spec details worth pinning, because both differ from the old helper:
+// "0x" ALONE qualifies (the spec says "zero or more ASCII hex digits", so the
+// hex tail may be empty), and a digit-LEADING label that is not fully numeric
+// does not qualify, which is what keeps a private zone like "svc.3internal"
+// resolvable.
+func TestEndsInNumber(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -262,17 +280,22 @@ func TestIsNumericLabel(t *testing.T) {
 	}{
 		{"empty label", "", false},
 		{"decimal", "127", true},
+		{"single digit", "1", true},
+		{"oversized inet_aton part", "16962", true},
 		{"lowercase hex", "0x7f", true},
 		{"uppercase X prefix and digits", "0XAB", true},
 		{"invalid hex digit", "0xZZ", false},
-		{"0x prefix only", "0x", false},
+		{"0x prefix only is a number per the spec", "0x", true},
 		{"decimal with letter", "1a", false},
+		{"digit-leading private TLD", "3internal", false},
+		{"real TLD", "com", false},
+		{"IDN A-label TLD", "xn--p1ai", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := isNumericLabel(tc.label); got != tc.want {
-				t.Errorf("isNumericLabel(%q) = %v, want %v", tc.label, got, tc.want)
+			if got := endsInNumber(tc.label); got != tc.want {
+				t.Errorf("endsInNumber(%q) = %v, want %v", tc.label, got, tc.want)
 			}
 		})
 	}
@@ -392,76 +415,104 @@ func TestValidateURL_empty_brackets_rejected(t *testing.T) {
 	}
 }
 
-// --- Enforcement vs predicate logging ---
+// --- The validation path is silent ---
 
-// IsPublicHost is a predicate, not an enforcement gate: probing a non-public
-// host must NOT emit a "ssrf blocked" Warn (no request was blocked). These
-// tests mutate slog.Default(), so they are NOT parallel — the testing
+// Every entry point on the validation path returns its verdict and logs
+// nothing. Validation computes: the *Error carries Kind, Host, Msg and Err, so
+// the caller already holds everything a log line could say, and whether to
+// record it is the caller's decision.
+//
+// Two things depend on this. A predicate with a hidden write to a global sink
+// is the defect Google's global-state guidance names for library providers, and
+// the caller cannot see, configure or silence that sink. And the text these
+// paths would log is caller-supplied, so a hostile host would reach a JSON
+// handler with its C1 and Bidi_Control runes intact (slog escapes only what
+// JSON requires). Refusing to log is what closes both, and it costs nothing the
+// returned error does not already carry.
+//
+// This test mutates slog.Default(), so it is NOT parallel — the testing
 // framework runs non-parallel tests to completion before parallel ones start,
-// so the global default is never swapped under a concurrent test.
-func TestIsPublicHost_predicate_is_silent(t *testing.T) {
+// so the global default is never swapped under a concurrent test. It captures
+// at Debug so a line at ANY level fails it, not just a Warn.
+func TestValidationPathIsSilent(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(prev)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	cases := []string{"10.0.0.1", "127.0.0.1", "localhost", "internal", "192.168.1.1"}
-	for _, host := range cases {
+	hosts := []string{"10.0.0.1", "127.0.0.1", "localhost", "internal", "192.168.1.1"}
+	for _, host := range hosts {
 		if IsPublicHost(host) {
 			t.Errorf("IsPublicHost(%q) = true, want false", host)
 		}
+		if err := ValidateURL("https://" + host); err == nil {
+			t.Errorf("ValidateURL(https://%s) = nil, want error", host)
+		}
+		if err := (URLPolicy{}).Validate("https://" + host); err == nil {
+			t.Errorf("URLPolicy{}.Validate(https://%s) = nil, want error", host)
+		}
+		if err := NewURLPolicy("http").Validate("http://" + host); err == nil {
+			t.Errorf("NewURLPolicy(\"http\").Validate(http://%s) = nil, want error", host)
+		}
 	}
-	if got := buf.String(); strings.Contains(got, "ssrf blocked") {
-		t.Errorf("IsPublicHost emitted a block log for predicate queries: %q", got)
-	}
-}
-
-// The ValidateURL enforcement path MUST still log a "ssrf blocked" Warn when it
-// rejects a host — the predicate-silence change must not mute real blocks.
-func TestValidateURL_enforcement_still_logs(t *testing.T) {
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	defer slog.SetDefault(prev)
-
-	if err := ValidateURL("https://10.0.0.1/x"); err == nil {
-		t.Fatal("ValidateURL(private IP) = nil, want error")
-	}
-	if got := buf.String(); !strings.Contains(got, "ssrf blocked") {
-		t.Errorf("ValidateURL enforcement path did not emit a block log; got %q", got)
+	if got := buf.String(); got != "" {
+		t.Errorf("the validation path emitted %q, want no output: a validator returns "+
+			"its verdict and lets the caller decide whether to record it", got)
 	}
 }
 
-// ValidateURL is the enforcement path: each rejection Kind maps to a distinct
-// "reason" attribute on the "ssrf blocked" Warn (emitted by
-// validateURLWithSchemes), which block dashboards group on. This pins the
-// Kind->reason mapping so a swapped map entry (a mutant) is caught. Not
-// parallel: it mutates slog.Default().
-func TestValidateURL_emits_reason_per_kind(t *testing.T) {
-	cases := []struct {
-		name       string
-		host       string
-		wantReason string
+// A rejected host's Msg must not carry raw control runes. The host reaches Msg
+// through fmt.Sprintf, and %q escapes every rune the four unsafe classes cover,
+// which is why the interpolations use it — Google recommends %q for exactly
+// this, "output intended for humans where the input value could possibly be
+// empty or contain control characters".
+//
+// This is the wider of the two exposures: Msg travels to every consumer that
+// prints the error, including sinks that are not slog and do no escaping.
+//
+// It calls hostValidationError rather than ValidateURL because url.Parse
+// rejects a raw control character in a URL, so these branches are only
+// reachable through the host-level entry point ([IsPublicHost] shares this
+// core). Each case asserts the Kind it expects: two earlier versions of this
+// test were vacuous — the first appended a newline, which the then-existing
+// interior-whitespace gate caught first, and the second appended U+007F, which
+// url.Parse rejected before any host branch ran. Both passed with the fix
+// reverted, so the Kind assertion is what keeps this test honest.
+func TestErrorMsgEscapesControlRunes(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		host string
+		kind ErrorKind
 	}{
-		{"empty host from trailing dots", ".", "empty_host"},
-		{"localhost", "localhost", "localhost"},
-		{"non public ip", "10.0.0.1", "non_public_ip"},
-		{"bare hostname", "internal", "bare_hostname"},
+		// Every host carrying an unsafe rune now lands on the canonical-host
+		// gate, which refuses non-ASCII before any structural check. That is
+		// one branch instead of the two this test used to straddle, and its
+		// message interpolates with %q like the rest.
+		"bare hostname, RLO":         {"internal\u202e", KindInvalidHost},
+		"bare hostname, arabic mark": {"internal\u061c", KindInvalidHost},
+		"interior tab":               {"example.com\t\u202e", KindInvalidHost},
+		"interior space":             {"example.com \u202e", KindInvalidHost},
+		// An ASCII-only structural refusal takes the same %q path, so the
+		// escaping is pinned for a host with no unsafe rune in it too.
+		"ascii control via authority syntax": {"example.com[\u007f]", KindInvalidHost},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-			defer slog.SetDefault(prev)
-
-			if err := ValidateURL("https://" + tc.host); err == nil {
-				t.Fatalf("ValidateURL(https://%s) = nil, want error", tc.host)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			verr := hostValidationError(tc.host)
+			if verr == nil {
+				t.Fatalf("hostValidationError(%q) = nil, want a rejection: the case must "+
+					"witness a rejecting branch to be measuring one", tc.host)
 			}
-
-			got := buf.String()
-			if !strings.Contains(got, "reason="+tc.wantReason) {
-				t.Errorf("ValidateURL(https://%s) block log = %q, want reason=%q", tc.host, got, tc.wantReason)
+			if verr.Kind != tc.kind {
+				t.Fatalf("hostValidationError(%q) Kind = %d, want %d: the fixture landed on "+
+					"a different branch than the one under test", tc.host, verr.Kind, tc.kind)
+			}
+			for _, r := range verr.Msg {
+				if runesafe.IsUnsafeSingleLine(r) {
+					t.Errorf("hostValidationError(%q) Msg = %q, want no unsafe rune; "+
+						"found U+%04X", tc.host, verr.Msg, r)
+				}
 			}
 		})
 	}
@@ -613,11 +664,13 @@ func TestHostValidation_localhostKinds(t *testing.T) {
 		{"localhost", KindLocalhost},
 		{"LOCALHOST", KindLocalhost},
 		{"LocalHost", KindLocalhost},
+		// The root label is stripped in normalization, ahead of the localhost
+		// fold, precisely so this keeps its specific diagnostic.
 		{"localhost.", KindLocalhost},
 		// Under Unicode folding this was KindLocalhost. It is not localhost —
-		// no resolver maps it to loopback — so it is a bare hostname, and it is
-		// rejected either way.
-		{"localho\u017ft", KindBareHostname},
+		// no resolver maps it to loopback — and it is now refused one step
+		// earlier, as a non-ASCII host, rather than as a bare hostname.
+		{"localho\u017ft", KindInvalidHost},
 	}
 	for _, tc := range cases {
 		t.Run(tc.host, func(t *testing.T) {
