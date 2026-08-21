@@ -331,12 +331,32 @@ func TestURLPolicyValidate_case_insensitive(t *testing.T) {
 }
 
 // NewURLPolicy lowercases constructor arguments, so an uppercase scheme
-// configures the same policy as its lowercase form.
+// configures the same policy as its lowercase form. The fold covers the whole
+// ASCII letter range, both ends included: a scheme spelled with the last letter
+// of the alphabet has to match as readily as one spelled with the first, and the
+// digits and separators of a registered scheme have to survive the fold
+// untouched. The constructor side is the side that matters, because url.Parse
+// has already lowercased the scheme by the time Validate compares it.
 func TestNewURLPolicy_folds_constructor_schemes(t *testing.T) {
 	t.Parallel()
-	err := NewURLPolicy("HTTPS", "HTTP").Validate("http://example.com/f")
-	if err != nil {
-		t.Errorf("constructor scheme case should be folded, got: %v", err)
+	tests := []struct {
+		name    string
+		schemes []string
+		url     string
+	}{
+		{"http_and_https", []string{"HTTPS", "HTTP"}, "http://example.com/f"},
+		{"every_ascii_letter", []string{"ABCDEFGHIJKLMNOPQRSTUVWXYZ"}, "abcdefghijklmnopqrstuvwxyz://example.com/f"},
+		// A registered scheme mixing the last letter of the alphabet with digits
+		// and a dot (Z39.50 over TLS, RFC 2056).
+		{"digits_and_dot_around_letters", []string{"Z39.50S"}, "z39.50s://example.com/f"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if err := NewURLPolicy(tt.schemes...).Validate(tt.url); err != nil {
+				t.Errorf("NewURLPolicy(%q).Validate(%q) = %v, want nil", tt.schemes, tt.url, err)
+			}
+		})
 	}
 }
 
