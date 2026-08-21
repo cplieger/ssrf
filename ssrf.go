@@ -33,9 +33,22 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
+
+	"github.com/cplieger/runesafe/v2"
 )
 
 const schemeHTTPS = "https"
+
+// DNS presentation-form limits, RFC 1035. maxDNSName is the 255-octet wire limit
+// minus the root label's length byte and terminating zero, which is the familiar
+// 253 characters a name occupies when written down without its trailing dot.
+// A host at either bound is accepted, so no resolvable name is ever refused for
+// length; only a value that could not be a name is.
+const (
+	maxDNSName  = 253
+	maxDNSLabel = 63
+)
 
 // maxRedirects is the maximum number of redirect hops a SafeRedirectPolicy
 // will follow before refusing further redirects.
@@ -74,6 +87,12 @@ const (
 	KindBadPort
 	// KindTooManyRedirects indicates a redirect chain exceeded the hop limit.
 	KindTooManyRedirects
+	// KindInvalidHost indicates the host is not a canonical host at all: it
+	// carries a byte no DNS label may hold, or an IP literal carries a zone
+	// identifier. Distinct from KindNonPublicIP, which means a well-formed host
+	// that points somewhere private. Appended last so the iota values above it
+	// keep the numbers consumers already branch on.
+	KindInvalidHost
 )
 
 // Error is a structured SSRF validation error with a machine-readable Kind.
@@ -226,10 +245,9 @@ func ValidateURL(raw string) error {
 	return validateURLWithSchemes(raw, nil)
 }
 
-// classifyURL is the SILENT classification core: it returns the *Error
-// describing why u is unsafe (nil if safe) and performs NO logging, so the
-// redirect policy can re-validate a hop without emitting a spurious "ssrf
-// blocked" line before its own "ssrf redirect blocked".
+// classifyURL is the classification core: it returns the *Error describing why
+// u is unsafe (nil if safe). Like every function on the validation path it
+// performs no logging; see [validateURLWithSchemes] for why.
 //
 // It judges the parsed URL it is handed. That is deliberate: the redirect policy
 // validates the very *url.URL net/http is about to dial, not a re-parse of its
@@ -259,9 +277,9 @@ func classifyURL(u *url.URL, schemes map[string]struct{}) *Error {
 	return hostValidationError(host)
 }
 
-// classifyURLWithSchemes parses raw and hands the result to [classifyURL]. It is
-// the silent counterpart to [validateURLWithSchemes], which logs a "ssrf
-// blocked" Warn on rejection. If schemes is nil, only HTTPS is allowed.
+// classifyURLWithSchemes parses raw and hands the result to [classifyURL],
+// returning the concrete *Error. [validateURLWithSchemes] is the wrapper that
+// converts it to the error interface. If schemes is nil, only HTTPS is allowed.
 func classifyURLWithSchemes(raw string, schemes map[string]struct{}) *Error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -271,13 +289,24 @@ func classifyURLWithSchemes(raw string, schemes map[string]struct{}) *Error {
 }
 
 // validateURLWithSchemes validates a URL against a set of allowed schemes,
-// emitting a single "ssrf blocked" Warn on rejection (the enforcement path). It
-// is the thin logging wrapper around [classifyURLWithSchemes]; the redirect
-// policy calls [classifyURL] directly to avoid a duplicate block log.
+// converting the *Error from [classifyURLWithSchemes] to the error interface.
 // If schemes is nil, only HTTPS is allowed.
+//
+// It does NOT log, and that is deliberate. Validation computes a verdict and
+// returns it fully described in the *Error — Kind, Host, Msg and Err — so the
+// caller already holds everything a log line could carry, and whether to record
+// it belongs to the caller rather than to this package. Emitting here would give
+// a pure predicate a side channel into a global sink the caller cannot see,
+// configure, or silence. Only the transport half logs, because its rejections
+// fire inside net/http where the error can be retried or wrapped past
+// recognition before any caller sees it. [IsPublicHost] is silent for the same
+// reason, and every entry point on this path behaves the same way.
+//
+// The explicit nil check is load-bearing: `return classifyURLWithSchemes(...)`
+// would put a typed nil *Error into a non-nil error interface, so every valid
+// URL would report a failure. Do not collapse it.
 func validateURLWithSchemes(raw string, schemes map[string]struct{}) error {
 	if verr := classifyURLWithSchemes(raw, schemes); verr != nil {
-		slog.Default().Warn("ssrf blocked", "host", verr.Host, "reason", reasonLabel(verr.Kind))
 		return verr
 	}
 	return nil
@@ -287,9 +316,8 @@ func validateURLWithSchemes(raw string, schemes map[string]struct{}) error {
 // Returns false for localhost, bare hostnames, RFC 1918/link-local IPs,
 // and RFC 6598 shared address space.
 //
-// As a predicate it is SILENT: unlike the [ValidateURL] enforcement path, a
-// false result emits no "ssrf blocked" log line, so callers can probe host
-// publicness (e.g. pre-filtering a list) without polluting block dashboards.
+// Like [ValidateURL] it emits no log line: the whole validation path returns
+// its verdict and lets the caller decide whether to record it.
 func IsPublicHost(host string) bool {
 	return hostValidationError(host) == nil
 }
@@ -309,46 +337,197 @@ func IsPublicAddr(addr netip.Addr) bool {
 // whitespace and empty-host rejections it detects along the way (nil error when
 // host is well-formed enough to classify).
 func normalizeHostForValidation(host string) (string, *Error) {
-	// Trim surrounding ASCII whitespace and fail closed on any interior
-	// whitespace: no IP literal or DNS label contains whitespace, so a
-	// space-padded internal literal ("127.0.0.1 ") must not slip past the
-	// dotted-hostname fallthrough as PUBLIC.
+	// Trim surrounding ASCII whitespace. The canonical-host gate would refuse a
+	// space anyway (it is not a legal host byte), so this is a compatibility
+	// affordance for a padded but otherwise well-formed host, not a security
+	// measure. Interior whitespace is left for that gate to refuse.
 	host = strings.TrimSpace(host)
-	if strings.ContainsAny(host, " \t\r\n") {
-		return host, ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL host contains whitespace: %q", host), nil)
-	}
 
-	// URL-authority bracket syntax wraps IPv6 literals ("[::1]",
-	// "[2606:4700:4700::1111]", "[::ffff:192.168.1.1]"). netip.ParseAddr rejects
-	// the brackets, so a bracketed IPv4-mapped/embedded-IPv4 internal literal
-	// whose dotted tail satisfies the contains-a-dot hostname gate below would
-	// otherwise be misclassified PUBLIC by IsPublicHost. Strip a single matching
-	// bracket pair and classify the inner literal, mirroring url.Hostname()
-	// (which ValidateURL already applies before reaching here): a genuinely
-	// public IPv6 literal stays public, an internal one is correctly rejected.
-	// ValidateURL never reaches here with brackets; this guards direct
-	// IsPublicHost callers passing raw URL-authority syntax.
-	// Strip trailing dots (FQDN notation) first so a trailing dot after the
-	// closing bracket ("[::ffff:192.168.1.1].") cannot defeat the bracket-strip
-	// guard and let a bracketed internal literal fall through as PUBLIC.
-	host = strings.TrimRight(host, ".")
-	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
-		host = host[1 : len(host)-1]
-	}
-	// Trim again in case the dots were inside the brackets.
-	host = strings.TrimRight(host, ".")
+	// A single trailing dot is the root label, and RFC 1034 presentation syntax
+	// admits it: "example.com." and "example.com" name the same node, and WHATWG
+	// treats both as valid ("The example.com and example.com. domains are not
+	// equivalent and typically treated as distinct"). Strip exactly one, and do
+	// it HERE, before the localhost fold in [hostValidationError], so that
+	// "localhost." still reports KindLocalhost rather than degrading to a
+	// generic refusal.
+	//
+	// A trailing dot also DISABLES resolver search-list suffixing
+	// (resolv.conf(5)), so the dotted spelling is the safer one against
+	// ndots expansion. Refusing it would push callers toward the riskier form.
+	//
+	// Two or more trailing dots are not presentation syntax; they leave an empty
+	// label, which the gate refuses.
+	host = strings.TrimSuffix(host, ".")
+
 	if host == "" {
 		return host, ssrfErr(KindEmptyHost, host, "empty host", nil)
 	}
 	return host, nil
 }
 
+// canonicalHostError is the CLOSED terminal gate: it returns nil only for a host
+// this package positively recognizes, and an *Error for everything else. It is
+// what replaced a permissive "contains a dot, therefore a public hostname" arm.
+//
+// The arm it replaced was the root cause of a family of bypasses, each closed
+// individually as it was found: non-canonical IPv4 encodings, bracketed IPv6,
+// trailing dots, interior whitespace. Two more were found in 2026-08 and are the
+// reason this gate exists, both of which reach a private literal through
+// STANDARD IDNA processing rather than through anything exotic:
+//
+//   - Format characters UTS-46 deletes. "127.0.0.1\u200b" (ZWSP) and the same
+//     with U+00AD, U+2060, U+FEFF or U+180B all map to exactly "127.0.0.1" with
+//     no error, and "169.254.169.254\u200b" maps to the cloud metadata address.
+//   - Characters UTS-46 maps to ASCII digits. "\uff11\uff16\uff19.254.169.254"
+//     (fullwidth digits) maps to "169.254.169.254"; "\u2460.\u2461.\u2462.\u2463"
+//     (circled digits) maps to "1.2.3.4". WHATWG names this class
+//     IPv4-non-ASCII-input.
+//
+// Enumerating those runes would be endless, so the gate inverts the question:
+// only ASCII letters, digits, hyphen and underscore may appear in a label, which
+// refuses every rune in both families with one condition and refuses the next
+// such family without an edit.
+//
+// SCOPE, and it is narrower than it looks: this is SYNTACTIC closure. A
+// well-formed public-looking name that RESOLVES to a private address still
+// passes, by design — "metadata.google.internal" and "a.localhost" are the
+// canonical examples. Only [SafeTransport]'s post-resolution checks stop those.
+func canonicalHostError(host string) *Error {
+	// Refuse non-ASCII outright rather than converting. A U-label such as
+	// "bücher.de" is not reachable by a Go consumer at all: measured on
+	// go1.27.0, net.Resolver refuses it before emitting a packet, while its
+	// A-label "xn--bcher-kva.de" resolves normally. Converting here would also
+	// couple the verdict to THIS package's Unicode tables while the consumer's
+	// client uses its own, and a validator that canonicalizes differently from
+	// its client is the shape of a real bypass class. A caller holding a U-label
+	// converts it to an A-label before validating.
+	//
+	// This check is a DIAGNOSTIC, not the guard. The label byte class below
+	// already refuses every non-ASCII byte, so deleting this loop would not open
+	// a hole; what it would lose is the message naming the remedy, and the
+	// correct Kind for a SINGLE-LABEL U-label ("bücher" reports KindInvalidHost
+	// with this check and KindBareHostname without it, which is a worse answer
+	// because the problem is not the missing dot). Verified by mutation.
+	for i := range len(host) {
+		if host[i] >= utf8.RuneSelf {
+			return ssrfErr(KindInvalidHost, host,
+				fmt.Sprintf("URL host is not ASCII, supply an A-label: %q", host), nil)
+		}
+	}
+
+	// Authority syntax is not a host. url.Hostname() and net.SplitHostPort both
+	// strip brackets, so ValidateURL never reaches here with them; a direct
+	// IsPublicHost caller passing raw authority syntax is refused rather than
+	// silently reinterpreted. Stripping them was how smokescreen's deny list was
+	// bypassed (CVE-2022-29188).
+	if strings.ContainsAny(host, "[]") {
+		return ssrfErr(KindInvalidHost, host,
+			fmt.Sprintf("URL host carries authority syntax, pass a bare host: %q", host), nil)
+	}
+
+	// The DNS presentation-form limit. Checked before splitting so an
+	// attacker-sized host costs one comparison.
+	if len(host) > maxDNSName {
+		return ssrfErr(KindInvalidHost, host,
+			fmt.Sprintf("URL host exceeds %d bytes", maxDNSName), nil)
+	}
+
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return ssrfErr(KindBareHostname, host, fmt.Sprintf("URL points to bare hostname: %q", host), nil)
+	}
+	for _, label := range labels {
+		if verr := hostLabelError(host, label); verr != nil {
+			return verr
+		}
+	}
+
+	// A name whose rightmost label is numeric is an IPv4 encoding, not a domain.
+	// This is what catches the alternate encodings netip.ParseAddr rejects but a
+	// libc resolver accepts: dotted-octal "0177.0.0.1", dotted-hex "0x7f.0.0.1",
+	// short-form "127.1", oversized inet_aton "192.168.257".
+	if endsInNumber(labels[len(labels)-1]) {
+		return ssrfErr(KindNonPublicIP, host,
+			fmt.Sprintf("URL host is a non-canonical IP encoding: %q", host), nil)
+	}
+	return nil
+}
+
+// hostLabelError returns the *Error describing why label is not a legal DNS
+// label, or nil if it is. host is carried only so the message names the whole
+// host the caller passed rather than the fragment that failed.
+func hostLabelError(host, label string) *Error {
+	if label == "" || len(label) > maxDNSLabel {
+		return ssrfErr(KindInvalidHost, host,
+			fmt.Sprintf("URL host has an empty or oversized label: %q", host), nil)
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return ssrfErr(KindInvalidHost, host,
+			fmt.Sprintf("URL host has a label bounded by a hyphen: %q", host), nil)
+	}
+	for i := range len(label) {
+		if !isHostLabelByte(label[i]) {
+			return ssrfErr(KindInvalidHost, host,
+				fmt.Sprintf("URL host is not a canonical DNS name: %q", host), nil)
+		}
+	}
+	return nil
+}
+
+// isHostLabelByte reports whether c may appear in a DNS label.
+//
+// Letters, digits and hyphen are RFC 1034's set. Underscore is admitted
+// deliberately, and the two authorities disagree about it: WHATWG omits it from
+// both the forbidden-host and forbidden-domain code point sets, while
+// x/net/idna's Lookup profile refuses it under UTS-46 UseSTD3ASCIIRules. It is
+// admitted here because refusing it has no security value (underscore cannot be
+// mapped to a dot or a digit, and cannot form an IP literal) while a Go consumer
+// CAN reach such a host: measured, net.Resolver puts "a_b.example.com" on the
+// wire, unlike a U-label, which it refuses before sending anything.
+func isHostLabelByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9') || c == '-' || c == '_'
+}
+
+// endsInNumber reports whether a name's rightmost label makes the whole name an
+// IPv4 address rather than a domain. It implements WHATWG's "ends in a number"
+// checker: the label is all ASCII digits, or it is "0x"/"0X" followed by zero or
+// more ASCII hex digits.
+//
+// https://url.spec.whatwg.org/#ends-in-a-number-checker
+//
+// A stricter rule was considered and rejected: "the rightmost label must begin
+// with an ASCII letter" gives an identical verdict on every dangerous input and
+// on every real TLD, and differs only by ALSO refusing digit-leading
+// non-numeric labels ("3internal", "4chan"). That is compatibility cost for no
+// security gain, and it would tie this grammar to today's root-zone inventory
+// rather than to a published rule.
+//
+// The sibling webhttp library carries its own numeric-IPv4 heuristic (inside
+// CanonicalHost's hostname validation) with a deliberately DIFFERENT reject set:
+// webhttp keys an exact-match inbound Host allowlist with no resolution, so it
+// accepts dotted-hex forms like "0x7f.0.0.1" as plain textual labels, while this
+// outbound classifier must reject them because they reach a resolver. The two
+// must NOT be unified — see CanonicalHost's doc for the inbound rationale.
+func endsInNumber(label string) bool {
+	if label == "" {
+		return false
+	}
+	if isDecimalDigits(label) {
+		return true
+	}
+	// "0x" alone qualifies: the spec says "zero or more ASCII hex digits".
+	if len(label) >= 2 && label[0] == '0' && (label[1] == 'x' || label[1] == 'X') {
+		return isHexDigits(label[2:])
+	}
+	return false
+}
+
 // hostValidationError returns the SSRF *Error describing why host is not a
 // public hostname, or nil if it is public. It performs NO logging — it is the
-// shared classification core. The enforcement path [validateURLWithSchemes]
-// (via [ValidateURL]) logs a "ssrf blocked" Warn on rejection; the
-// [IsPublicHost] predicate uses this core directly and stays silent (a query is
-// not a block).
+// shared classification core behind both [ValidateURL] and the [IsPublicHost]
+// predicate, and the whole validation path is silent by design
+// ([validateURLWithSchemes] carries the reasoning).
 func hostValidationError(host string) *Error {
 	host, verr := normalizeHostForValidation(host)
 	if verr != nil {
@@ -361,77 +540,35 @@ func hostValidationError(host string) *Error {
 
 	// Parse as IP first.
 	if addr, err := netip.ParseAddr(host); err == nil {
+		// A zone identifier scopes an address to one interface, so it is
+		// meaningless on a globally routable address and cannot be dialed as
+		// written by a normal client. netip.ParseAddr accepts one only on IPv6,
+		// which is why "2606:4700::1111%eth0" reaches here at all while
+		// "127.0.0.1%eth0" does not (that one fails to parse and is caught by
+		// the canonical-host gate below). Refusing here closes the IPv6 half:
+		// without it, isPublicAddr judges the address and reports a zoned
+		// global address PUBLIC. RFC 6874 permits a zone in a URI only for
+		// link-local, and WHATWG omits zone support from URL host parsing
+		// outright ("Support for <zone_id> is intentionally omitted").
+		if addr.Zone() != "" {
+			return ssrfErr(KindInvalidHost, host,
+				fmt.Sprintf("URL host carries a zone identifier: %q", host), nil)
+		}
 		addr = addr.Unmap()
 		if !isPublicAddr(addr) {
-			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL points to non-public IP: %s", host), nil)
+			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL points to non-public IP: %q", host), nil)
 		}
 		return nil
 	}
 
-	// Reject non-canonical IPv4 encodings (dotted-octal "0177.0.0.1",
-	// dotted-hex "0x7f.0.0.1", short-form "127.1", oversized inet_aton
-	// "192.168.257"). netip.ParseAddr is strict and rejects all of these, so
-	// without this gate they fall through to the dotted-hostname arm below and
-	// ValidateURL returns nil — yet a libc resolver (glibc getaddrinfo) resolves
-	// them to internal addresses. A real DNS name never has an all-numeric label
-	// set, so that is a reliable signature for these alternate encodings.
-	if looksLikeNumericIPv4(host) {
-		return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("URL host is a non-canonical IP encoding: %s", host), nil)
-	}
-
-	// Not an IP; must be a hostname with at least one dot.
-	if !strings.Contains(host, ".") {
-		return ssrfErr(KindBareHostname, host, fmt.Sprintf("URL points to bare hostname: %s", host), nil)
-	}
-	return nil
-}
-
-// looksLikeNumericIPv4 reports whether every dot-separated label of host is a
-// decimal/octal/hex integer — the signature of a non-canonical IPv4 encoding
-// (dotted-octal, dotted-hex, or oversized inet_aton form) that netip.ParseAddr
-// rejects but a libc resolver would accept. Dotless forms (fewer than two
-// labels) are left to the bare-hostname gate.
-//
-// The sibling webhttp library carries its own numeric-IPv4 heuristic (inside
-// CanonicalHost's hostname validation) with a deliberately DIFFERENT reject
-// set: webhttp keys an exact-match inbound Host allowlist with no resolution,
-// so it accepts dotted-hex forms like "0x7f.0.0.1" as plain textual labels,
-// while this outbound classifier must reject them because they reach a
-// resolver. The two must NOT be unified — see CanonicalHost's doc for the
-// inbound rationale.
-func looksLikeNumericIPv4(host string) bool {
-	labels := strings.Split(host, ".")
-	if len(labels) < 2 {
-		return false // dotless forms handled by the bare-hostname gate
-	}
-	for _, l := range labels {
-		if !isNumericLabel(l) {
-			return false
-		}
-	}
-	return true
-}
-
-// isNumericLabel reports whether l is a non-empty string of decimal digits
-// or a 0x-prefixed hex literal. It intentionally OVER-matches relative to
-// inet_aton (it also accepts forms inet_aton rejects, e.g. invalid-octal
-// "08" or out-of-range "257"): looksLikeNumericIPv4 uses it only to DETECT
-// and reject a non-canonical IPv4 encoding, never to parse one, so a
-// fail-closed superset is safe. Do NOT tighten it toward strict inet_aton
-// semantics -- a narrowed form would fall through to the dotted-hostname
-// arm and reach the resolver.
-func isNumericLabel(l string) bool {
-	if l == "" {
-		return false
-	}
-	if len(l) > 2 && l[0] == '0' && (l[1] == 'x' || l[1] == 'X') {
-		return isHexDigits(l[2:])
-	}
-	return isDecimalDigits(l)
+	// Not an IP literal, so the closed gate decides. Everything it does not
+	// positively recognize is refused; there is no permissive fallthrough.
+	return canonicalHostError(host)
 }
 
 // isHexDigits reports whether every rune in s is a hexadecimal digit. An empty
-// s reports true (vacuous); isNumericLabel only calls it with a non-empty tail.
+// s reports true (vacuous), which is what endsInNumber wants for the bare "0x"
+// form the WHATWG rule admits.
 func isHexDigits(s string) bool {
 	for _, c := range s {
 		if !isHexDigit(c) {
@@ -536,14 +673,18 @@ var reasonLabels = map[ErrorKind]string{
 	KindPolicyDenied:     "policy_denied",
 	KindBadPort:          "bad_port",
 	KindTooManyRedirects: "too_many_redirects",
+	KindInvalidHost:      "invalid_host",
 }
 
 // reasonLabel maps an ErrorKind to the bounded, low-cardinality "reason" label
-// emitted by the host-validation path ([validateURLWithSchemes], via
-// [ValidateURL]), the redirect policy, and the policy-denial branch of the
+// emitted by the redirect policy and by the policy-denial branch of the
 // socket-level paths ([safeControl], [safeDialContext]) -- which pass
 // KindNonPublicIP by default or KindPolicyDenied under a custom
-// [WithAddressPolicy].
+// [WithAddressPolicy]. The validation entry points do not log
+// ([validateURLWithSchemes] carries the reasoning), but every Kind they produce
+// still reaches this table through the redirect policy, which re-validates each
+// hop with [classifyURL] and labels the inner Kind. So the table stays
+// exhaustive; TestReasonLabel_exhaustive fails on a missing entry.
 // The socket-level paths' structural rejections and port checks
 // (checkAllowedPort) intentionally emit their own finer-grained inline labels
 // (e.g. "no_ips_resolved", "disallowed_network", "unparseable_ip",
@@ -556,6 +697,87 @@ func reasonLabel(kind ErrorKind) string {
 		return label
 	}
 	return "blocked"
+}
+
+// --- Log attribute shaping ---
+
+// Byte bounds for the untrusted text this package writes to a log attribute.
+// Each is the longest LEGAL value for its key, so a well-formed value is never
+// truncated and only a malformed one is cut — and on these paths every logged
+// value is malformed by definition, because the log line exists to record a
+// refusal.
+//
+// The bounds are per key rather than one number for all of them: a redirect
+// URL legitimately runs past a host's ceiling, and a port's text is five digits
+// at most, so a single bound would either truncate good data or fail to bound
+// the shortest field.
+const (
+	// maxHostLog is RFC 1035's maximum DNS name length (253 characters as
+	// presented, 255 on the wire including the root label and its length
+	// byte), so no resolvable host is ever truncated.
+	maxHostLog = 253
+	// maxAddrLog is a host, ":", and the longest port text ("65535").
+	maxAddrLog = maxHostLog + len(":") + len("65535")
+	// maxURLLog bounds a redirect target. A URL has no ceiling in RFC 3986, so
+	// this is the de-facto browser and proxy limit; it keeps one refusal inside
+	// a log pipeline's per-line budget.
+	maxURLLog = 2048
+	// maxPortLog bounds the raw port TEXT, which is only ever logged when it
+	// failed to parse as a uint16 and is therefore not a port at all.
+	maxPortLog = 8
+	// maxErrLog bounds a wrapped error's rendered text. It can quote the host:
+	// net.DNSError carries the name it could not resolve, so a resolver error
+	// is as attacker-shaped as the host itself.
+	maxErrLog = 512
+)
+
+// hostForLog returns host sanitized and bounded for use as a log attribute
+// value.
+//
+// Every log site on the transport path routes its untrusted text through one of
+// these helpers instead of calling runesafe directly. That keeps one policy per
+// key in one place, so a site added later cannot silently pick a different
+// bound, and it keeps the choice of preset out of the call site.
+//
+// The preset is [runesafe.SanitizeSingleLineBounded] rather than a plain byte
+// cap because a cap alone is not enough: slog's JSONHandler escapes only what
+// JSON requires (below U+0020), so C1 controls, Unicode Bidi_Control and
+// U+2028/U+2029 reach a JSON log sink intact. It is not the [runesafe.Untrusted]
+// type either, whose LogValue resolves to the unbounded multi-line form.
+func hostForLog(host string) string {
+	return runesafe.SanitizeSingleLineBounded(host, maxHostLog)
+}
+
+// addrForLog returns a "host:port" address sanitized and bounded for a log
+// attribute value. See [hostForLog] for the policy.
+func addrForLog(addr string) string {
+	return runesafe.SanitizeSingleLineBounded(addr, maxAddrLog)
+}
+
+// urlForLog returns a URL sanitized and bounded for a log attribute value. Pass
+// the output of (*url.URL).Redacted so userinfo is stripped before this point;
+// this helper bounds and sanitizes, it does not redact. See [hostForLog] for
+// the policy.
+func urlForLog(raw string) string {
+	return runesafe.SanitizeSingleLineBounded(raw, maxURLLog)
+}
+
+// portForLog returns unparseable port text sanitized and bounded for a log
+// attribute value. See [hostForLog] for the policy.
+func portForLog(port string) string {
+	return runesafe.SanitizeSingleLineBounded(port, maxPortLog)
+}
+
+// errTextForLog renders err and returns it sanitized and bounded for a log
+// attribute value, or "" for a nil err. It returns a STRING rather than the
+// error so the sanitized form is what every handler encodes: an error logged as
+// itself is rendered by the handler, which would put the raw text back.
+// See [hostForLog] for the policy.
+func errTextForLog(err error) string {
+	if err == nil {
+		return ""
+	}
+	return runesafe.SanitizeSingleLineBounded(err.Error(), maxErrLog)
 }
 
 // --- Blocked ranges ---
@@ -740,14 +962,12 @@ func (p URLPolicy) RedirectPolicy(
 			return ssrfErr(KindTooManyRedirects, "", fmt.Sprintf("stopped after %d redirects", maxRedirects), nil)
 		}
 		if verr := classifyURL(req.URL, p.allowedSchemes); verr != nil {
-			// Use the silent classification core so only "ssrf redirect
-			// blocked" is emitted (not a duplicate inner "ssrf blocked"). The
-			// inner Kind is propagated so a caller inspecting
+			// The inner Kind is propagated so a caller inspecting
 			// errors.As(&ssrf.Error).Kind sees the real reason (bad scheme,
 			// empty host, non-public IP, ...) rather than a blanket value.
 			kind := verr.Kind
 			slog.Default().Warn("ssrf redirect blocked",
-				"url", req.URL.Redacted(), "reason", reasonLabel(kind), "error", verr)
+				"url", urlForLog(req.URL.Redacted()), "reason", reasonLabel(kind), "error", errTextForLog(verr))
 			return ssrfErr(kind, req.URL.Hostname(), "redirect blocked (SSRF): "+verr.Error(), verr)
 		}
 		if next != nil {
@@ -769,11 +989,11 @@ func (p URLPolicy) RedirectPolicy(
 func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage string) error {
 	p, parseErr := strconv.ParseUint(portStr, 10, 16)
 	if parseErr != nil {
-		slog.Default().Warn("ssrf "+stage+" blocked", "host", host, "port", portStr, "reason", "bad_port")
+		slog.Default().Warn("ssrf "+stage+" blocked", "host", hostForLog(host), "port", portForLog(portStr), "reason", "bad_port")
 		return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF %s: invalid port %q", stage, portStr), parseErr)
 	}
 	if _, ok := allowedPorts[uint16(p)]; !ok {
-		slog.Default().Warn("ssrf "+stage+" blocked", "host", host, "port", uint16(p), "reason", "port_not_allowed")
+		slog.Default().Warn("ssrf "+stage+" blocked", "host", hostForLog(host), "port", uint16(p), "reason", "port_not_allowed")
 		return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF %s: port %d is not allowed", stage, p), nil)
 	}
 	return nil
@@ -797,13 +1017,19 @@ func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKin
 	}
 	return func(network, address string, _ syscall.RawConn) error {
 		if network != "tcp4" && network != "tcp6" {
+			// network is the ONE string this package logs without a ForLog
+			// helper: net/http supplies it from its own constants ("tcp",
+			// "tcp4", "tcp6"), it is not host-shaped, and it has no path from
+			// caller input. Every other string in a slog call here goes through
+			// a helper, which is what makes the sweep in
+			// TestLogAttributesAreSanitizedAndBounded mechanical.
 			slog.Default().Warn("ssrf control blocked", "network", network, "reason", "disallowed_network")
 			return ssrfErr(KindNonPublicIP, "", fmt.Sprintf("SSRF control: disallowed network %q", network), nil)
 		}
 
 		host, portStr, err := net.SplitHostPort(address)
 		if err != nil {
-			slog.Default().Warn("ssrf control blocked", "address", address, "reason", "invalid_address")
+			slog.Default().Warn("ssrf control blocked", "address", addrForLog(address), "reason", "invalid_address")
 			return ssrfErr(KindInvalidURL, "", fmt.Sprintf("SSRF control: invalid address %q", address), err)
 		}
 
@@ -815,7 +1041,7 @@ func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKin
 		// Validate IP at dial time (defense-in-depth).
 		addr, parseErr := netip.ParseAddr(host)
 		if parseErr != nil {
-			slog.Default().Warn("ssrf control blocked", "ip", host, "reason", "unparseable_ip")
+			slog.Default().Warn("ssrf control blocked", "ip", hostForLog(host), "reason", "unparseable_ip")
 			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF control: cannot parse IP %q", host), parseErr)
 		}
 		addr = addr.Unmap()
@@ -854,7 +1080,7 @@ func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			slog.Default().Warn("ssrf dial blocked", "address", addr, "reason", "invalid_address")
+			slog.Default().Warn("ssrf dial blocked", "address", addrForLog(addr), "reason", "invalid_address")
 			return nil, ssrfErr(KindInvalidURL, "", fmt.Sprintf("SSRF dial: invalid address %q", addr), err)
 		}
 
@@ -881,11 +1107,11 @@ func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPo
 	ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
 	cancel()
 	if err != nil {
-		slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "dns_failed", "error", err)
+		slog.Default().Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "dns_failed", "error", errTextForLog(err))
 		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: DNS lookup failed for %q", host), err)
 	}
 	if len(ips) == 0 {
-		slog.Default().Warn("ssrf dial blocked", "host", host, "reason", "no_ips_resolved")
+		slog.Default().Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "no_ips_resolved")
 		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: no IPs resolved for %q", host), nil)
 	}
 
@@ -895,7 +1121,7 @@ func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPo
 		safe[i] = ips[i].Unmap()
 		if !policy(safe[i]) {
 			slog.Default().Warn("ssrf dial blocked",
-				"host", host, "resolved_ip", safe[i].String(), "reason", reasonLabel(policyDenyKind))
+				"host", hostForLog(host), "resolved_ip", safe[i].String(), "reason", reasonLabel(policyDenyKind))
 			return nil, ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
 		}
 	}
@@ -917,14 +1143,14 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, po
 	dialList := safe
 	if len(dialList) > maxDialIPs {
 		slog.Default().Warn("ssrf dial capped",
-			"host", host, "resolved", len(safe), "dialing", maxDialIPs)
+			"host", hostForLog(host), "resolved", len(safe), "dialing", maxDialIPs)
 		dialList = dialList[:maxDialIPs]
 	}
 	var lastErr error
 	for _, ip := range dialList {
 		if ctx.Err() != nil {
 			slog.Default().Debug("ssrf dial aborted",
-				"host", host, "reason", "context_cancelled", "error", ctx.Err())
+				"host", hostForLog(host), "reason", "context_cancelled", "error", errTextForLog(ctx.Err()))
 			return nil, fmt.Errorf("SSRF dial: context cancelled: %w", ctx.Err())
 		}
 		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
@@ -934,7 +1160,7 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, po
 		lastErr = dialErr
 	}
 	slog.Default().Debug("ssrf dial failed",
-		"host", host, "ips_tried", len(dialList), "error", lastErr)
+		"host", hostForLog(host), "ips_tried", len(dialList), "error", errTextForLog(lastErr))
 	return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(dialList), host, lastErr)
 }
 
