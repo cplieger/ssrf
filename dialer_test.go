@@ -198,9 +198,7 @@ func TestSafeDialContext_caps_dial_attempts_only_above_maxDialIPs(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-			defer slog.SetDefault(prev)
+			swapDefaultLogger(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
 			r := &mockResolver{ips: loopbackIPs(tc.resolved)}
 			dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}})

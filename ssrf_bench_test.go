@@ -418,15 +418,9 @@ const maxRefusalGrowth = 8
 // starts allocating per log line remains visible — that is the half a
 // slog.DiscardHandler would hide, and it is worth 3 allocations of difference at
 // the 64 KiB rung.
-//
-// Restored through t.Cleanup rather than defer: a defer does not run on a
-// subtest's failure path, which would leak the discard handler into the rest of
-// the package.
 func pinBlockLogger(t *testing.T) {
 	t.Helper()
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	swapDefaultLogger(t, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelWarn})))
 }
 
 // TestIsPublicAddrIsAllocationFree pins the strongest contract in the package:
