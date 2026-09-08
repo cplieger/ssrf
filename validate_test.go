@@ -456,9 +456,7 @@ func TestValidateURL_empty_brackets_rejected(t *testing.T) {
 // at Debug so a line at ANY level fails it, not just a Warn.
 func TestValidationPathIsSilent(t *testing.T) {
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	swapDefaultLogger(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	hosts := []string{"10.0.0.1", "127.0.0.1", "localhost", "internal", "192.168.1.1"}
 	for _, host := range hosts {

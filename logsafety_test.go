@@ -2,6 +2,8 @@ package ssrf
 
 import (
 	"bytes"
+	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -117,17 +119,53 @@ func TestMaxHostLogIsTheDNSNameLimit(t *testing.T) {
 
 // --- The transport path, end to end ---
 
+// swapDefaultLogger installs logger as the process default for the test and
+// restores all three globals slog.SetDefault writes. It also points the log
+// package at the installed handler and SKIPS that redirect for slog's own
+// default handler, so restoring slog alone leaves log writing into a buffer
+// nothing reads. slog goes back first: reinstalling a non-default handler
+// re-runs the redirect and would undo an earlier log restore. Restored with
+// t.Cleanup rather than defer, which would not run on a subtest's failure path.
+func swapDefaultLogger(t *testing.T, logger *slog.Logger) {
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(logger)
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+}
+
+// TestSwapDefaultLogger_restoresLogPackageGlobals pins the restore every log
+// assertion in this package rests on: a leaked redirect silences every later
+// slog call in the binary, because the stock default handler emits through
+// log.Output.
+func TestSwapDefaultLogger_restoresLogPackageGlobals(t *testing.T) {
+	wantWriter, wantFlags := log.Writer(), log.Flags()
+
+	t.Run("swap", func(t *testing.T) {
+		swapDefaultLogger(t, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		if log.Writer() == wantWriter {
+			t.Fatal("slog.SetDefault did not redirect log's writer, so this test cannot observe the restore")
+		}
+	})
+
+	if log.Writer() != wantWriter {
+		t.Error("log.Writer() not restored; later slog calls write into the swapped handler's buffer")
+	}
+	if got := log.Flags(); got != wantFlags {
+		t.Errorf("log.Flags() = %d, want %d", got, wantFlags)
+	}
+}
+
 // captureJSON points slog.Default() at a JSONHandler for the duration of the
-// test and returns the buffer. JSON is the sink that matters: it is what
-// subflux runs, and it is the handler that emits C1 and Bidi_Control raw, so a
-// missing sanitize is only visible here. Restored with t.Cleanup rather than
-// defer, which would not run on a subtest's failure path.
+// test and returns the buffer. JSON is the sink that matters: it is what a
+// consumer runs, and it is the handler that emits C1 and Bidi_Control raw, so a
+// missing sanitize is only visible here.
 func captureJSON(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	swapDefaultLogger(t, slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return &buf
 }
 
