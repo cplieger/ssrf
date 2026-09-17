@@ -2,10 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v4.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v4)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
-[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/coverage.json)](https://github.com/cplieger/ssrf/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13220/badge)](https://www.bestpractices.dev/projects/13220)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/ssrf/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/ssrf)
 
 > URL validation to prevent server-side request forgery (SSRF)
 
@@ -86,8 +83,10 @@ if ssrf.IsPublicAddr(addr) {
 
 `ValidateURL`, `IsPublicHost` and `URLPolicy.Validate` do no DNS lookup: they
 judge the host as written. A public-looking name that resolves to an internal
-address passes them. Pair them with `SafeTransport`, which validates the
-resolved IP and again the connected IP at dial time.
+address passes them — `localhost.localdomain`, `a.localhost` and
+`metadata.google.internal` are all accepted by the host check and all resolve
+privately. Pair them with `SafeTransport`, which validates the resolved IP and
+again the connected IP at dial time.
 
 ### What counts as a host
 
@@ -145,19 +144,19 @@ stronger check than any standing permissive policy.
 
 All errors returned by `ValidateURL`, `SafeTransport`'s dial function, and the redirect policies are `*ssrf.Error` with a `Kind` field:
 
-| Kind                   | Meaning                               |
-| ---------------------- | ------------------------------------- |
-| `KindInvalidURL`       | URL could not be parsed               |
-| `KindBadScheme`        | Scheme is not in the allowed set      |
-| `KindEmptyHost`        | No host component                     |
-| `KindLocalhost`        | Points to localhost                   |
-| `KindBareHostname`     | Hostname without dots                 |
-| `KindNonPublicIP`      | IP is not globally routable           |
-| `KindDNSFailed`        | DNS resolution failed                 |
-| `KindPolicyDenied`     | Custom policy rejected the IP         |
-| `KindBadPort`          | Port is not in the allowed set        |
-| `KindTooManyRedirects` | Redirect chain exceeded the hop limit |
-| `KindInvalidHost`      | Not a canonical host at all           |
+| Kind                   | Meaning                                  |
+| ---------------------- | ---------------------------------------- |
+| `KindInvalidURL`       | URL could not be parsed                  |
+| `KindBadScheme`        | Scheme is not in the allowed set         |
+| `KindEmptyHost`        | No host component                        |
+| `KindLocalhost`        | Points to localhost                      |
+| `KindBareHostname`     | Hostname without dots                    |
+| `KindNonPublicIP`      | IP is not globally routable              |
+| `KindDNSFailed`        | DNS resolution failed                    |
+| `KindPolicyDenied`     | Custom policy rejected the IP            |
+| `KindBadPort`          | Port is not in the allowed set           |
+| `KindTooManyRedirects` | Redirect chain exceeded the 10-hop limit |
+| `KindInvalidHost`      | Not a canonical host at all              |
 
 When a redirect is blocked because the target URL failed validation, the policy
 propagates the underlying `Kind` (e.g. `KindBadScheme`), so `errors.As(&ssrf.Error)`
