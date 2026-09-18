@@ -1,8 +1,6 @@
 # ssrf
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v4.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v4)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v4.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
 
 > URL validation to prevent server-side request forgery (SSRF)
 
