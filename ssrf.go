@@ -1000,16 +1000,10 @@ func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage str
 }
 
 // safeControl returns a net.Dialer Control function that validates the
-// actually-connected IP address at socket creation time. This is the
-// canonical defense-in-depth against DNS rebinding/TOCTOU, mirroring
-// doyensec/safeurl and Stripe smokescreen's approach. The Control hook
-// fires after DNS resolution but before the TCP handshake completes.
-//
-// denyKind is an optional override for the ErrorKind emitted when policy
-// rejects the connected IP; it defaults to KindNonPublicIP. SafeTransport
-// passes KindPolicyDenied when a custom WithAddressPolicy is in effect, so a
-// custom-policy denial surfaces the documented KindPolicyDenied. Structural
-// rejections (disallowed network, unparseable IP) always use KindNonPublicIP.
+// connected IP after DNS resolution and before the handshake, closing the DNS
+// rebinding window. A policy rejection reports denyKind (default
+// KindNonPublicIP; SafeTransport passes KindPolicyDenied under a custom
+// WithAddressPolicy); structural rejections always report KindNonPublicIP.
 func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(network, address string, c syscall.RawConn) error {
 	policyDenyKind := KindNonPublicIP
 	if len(denyKind) > 0 {

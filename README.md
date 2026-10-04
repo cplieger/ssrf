@@ -2,254 +2,115 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v4.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
 
-> URL validation to prevent server-side request forgery (SSRF)
+ssrf keeps your Go service's outbound requests off private networks and cloud metadata endpoints, by checking URLs before you fetch and every address at connect time.
 
-Go library that validates URLs and IP addresses against SSRF attacks. Rejects private, loopback, link-local, and CGNAT addresses, enforces HTTPS (configurable), and detects IPv6 transition-mechanism bypasses (6to4, NAT64, Teredo, IPv4-compatible). Ships a hardened HTTP transport whose DNS-rebinding defense validates twice: once at resolution and again via a `net.Dialer.Control` hook at socket creation. Standard library plus one first-party dependency ([runesafe](https://github.com/cplieger/runesafe), which bounds and sanitizes the untrusted text that reaches a log attribute); the test-only dependency is pgregory.net/rapid for property-based testing.
+It replaces the URL checks and custom dialer you would otherwise write around `net/http`, and it hands back a plain `*http.Transport` and `CheckRedirect` function. At run time it uses the standard library and one dependency, [runesafe](https://github.com/cplieger/runesafe) by the same author, to clean untrusted text in its log lines. It needs Go 1.27.1 or later and is licensed under Apache-2.0.
+
+## Why use it
+
+ssrf is built for Go code that fetches URLs a user or an upstream response supplies, such as webhooks and link previews.
+
+- `ValidateURL` refuses a non-HTTPS URL, `localhost`, a name with no dot, and private, loopback, link-local, carrier-grade NAT and reserved addresses.
+- `SafeTransport` stops DNS rebinding, where a checked name later resolves to an internal address. It looks up each name once, refuses it when any address is not public, and connects only to a checked address. It checks the connected address again before the TCP handshake.
+- It also checks the IPv4 address inside a 6to4, NAT64 or Teredo IPv6 address.
+- The transport connects to port 443 only unless you list other ports.
+- Every refusal is an `*ssrf.Error` whose `Kind` you can switch on.
+
+Consider [Smokescreen](https://github.com/stripe/smokescreen) if you want a separate egress proxy instead of a library. It authenticates clients over mTLS and applies a hostname allowlist per client.
 
 ## Install
 
-`go get github.com/cplieger/ssrf/v4@latest`
+```sh
+go get github.com/cplieger/ssrf/v4@latest
+```
 
 ## Usage
+
+Check a URL, then fetch it through a client that checks every address and every redirect:
 
 ```go
 import "github.com/cplieger/ssrf/v4"
 
-// Validate a URL before fetching
 if err := ssrf.ValidateURL("https://example.com/data.json"); err != nil {
-    log.Fatal(err)
+    return err
 }
 
-// Use the hardened transport for all outbound requests
 client := &http.Client{
+    Timeout:       30 * time.Second,
     Transport:     ssrf.SafeTransport(),
     CheckRedirect: ssrf.SafeRedirectPolicy(nil),
 }
+```
 
-// Allow HTTP + HTTPS with custom ports: the URL policy gates schemes on
-// requests and redirect hops, the transport gates IPs and ports at dial time
+To allow plain HTTP as well, set the schemes on a `URLPolicy` and the ports on the transport. The policy checks schemes on the first request and on every redirect, and the transport checks addresses and ports at dial time:
+
+```go
 policy := ssrf.NewURLPolicy("https", "http")
-client = &http.Client{
+client := &http.Client{
     Transport:     ssrf.SafeTransport(ssrf.WithAllowedPorts(443, 80)),
     CheckRedirect: policy.RedirectPolicy(nil),
 }
 if err := policy.Validate("http://example.com/data.json"); err != nil {
-    log.Fatal(err)
+    return err
 }
+```
 
-// Programmatic error handling
-var ssrfErr *ssrf.Error
-if errors.As(err, &ssrfErr) {
-    switch ssrfErr.Kind {
-    case ssrf.KindBadScheme:
-        // handle scheme error
-    case ssrf.KindNonPublicIP:
-        // handle blocked IP
-    case ssrf.KindBadPort:
-        // handle port restriction
-    }
-}
+Check an address you already resolved:
 
-// Check a pre-resolved IP directly
-addr := netip.MustParseAddr("8.8.8.8")
-if ssrf.IsPublicAddr(addr) {
+```go
+if ssrf.IsPublicAddr(netip.MustParseAddr("8.8.8.8")) {
     // safe to connect
 }
 ```
 
+[Error kinds](docs/errors.md) shows how to switch on a refusal's `Kind`. The `Example` functions on pkg.go.dev are runnable, and `go test` keeps them true.
+
 ## API
 
-### Types
+- Validation: `ValidateURL`, `IsPublicHost`, `IsPublicAddr`, and `URLPolicy` with `NewURLPolicy` and its `Validate` method.
+- Transport: `SafeTransport` with the options `WithAllowedPorts`, `WithAddressPolicy`, `WithResolver` and `WithDialer`, and the `TransportOption`, `AddressPolicy` and `Resolver` types.
+- Redirects: `SafeRedirectPolicy` and `URLPolicy.RedirectPolicy`, which check every hop and stop after 10.
+- Errors: `Error`, with its `Kind`, `Host`, `Msg` and `Err` fields, and the `ErrorKind` constants.
 
-- `TransportOption`: functional option for configuring `SafeTransport`
-- `AddressPolicy func(netip.Addr) bool`: allow/deny predicate for resolved IPs
-- `URLPolicy`: scheme + public-host validation for requests and redirect hops; the zero value is HTTPS-only
-- `Resolver`: interface for DNS resolution (`LookupNetIP`)
-- `Error`: structured SSRF error with `Kind`, `Host`, `Msg`, and `Err` fields
-- `ErrorKind`: enum classifying SSRF validation failures
+The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/ssrf/v4).
 
-### Functions
+## Validation reads the name, the transport checks the address
 
-- `ValidateURL(raw string) error`: checks scheme is HTTPS and host is public
-- `IsPublicHost(host string) bool`: returns whether a host/IP is globally routable
-- `IsPublicAddr(addr netip.Addr) bool`: returns whether an IP is globally routable
-- `SafeRedirectPolicy(next) func`: HTTPS-only redirect policy that validates each hop
-- `SafeTransport(opts ...TransportOption) *http.Transport`: transport with DNS-rebinding-safe dial + Control hook
-- `NewURLPolicy(schemes ...string) URLPolicy`: URL policy with a custom scheme set (empty = HTTPS-only)
-- `URLPolicy.Validate(raw string) error`: checks scheme is allowed and host is public
-- `URLPolicy.RedirectPolicy(next) func`: redirect policy validating each hop against the policy's schemes
+`ValidateURL`, `IsPublicHost` and `URLPolicy.Validate` do no DNS lookup. They judge the host as written, so a public-looking name that resolves to an internal address passes them. The host check accepts `localhost.localdomain`, `a.localhost` and `metadata.google.internal`, and all three resolve privately. Use the validation functions with `SafeTransport`, which checks the resolved address and the connected address.
 
-`ValidateURL`, `IsPublicHost` and `URLPolicy.Validate` do no DNS lookup: they
-judge the host as written. A public-looking name that resolves to an internal
-address passes them — `localhost.localdomain`, `a.localhost` and
-`metadata.google.internal` are all accepted by the host check and all resolve
-privately. Pair them with `SafeTransport`, which validates the resolved IP and
-again the connected IP at dial time.
+The host check accepts two kinds of host and refuses every other string, most with `KindInvalidHost`. One is an IP address without a zone suffix such as `%eth0`, which names a network interface. The other is an ASCII DNS name with at least two labels, such as `api.example.com`.
 
-### What counts as a host
+ssrf refuses a non-ASCII host instead of converting it, so convert an internationalized name to its `xn--` form first. The C library's resolver reads `0177.0.0.1`, `0x7f.0.0.1` and `127.1` as 127.0.0.1, so the check refuses any name whose last label is a number, with `KindNonPublicIP`. Pass a bare host without brackets. `ValidateURL` already does this with `url.Hostname()`.
 
-The host check is an allowlist, not a blocklist: a host is accepted only if it is
-one of two things, and everything else is refused with `KindInvalidHost`.
+[Host validation](docs/host-validation.md) has the full grammar and the reasons for it, and [Blocked address ranges](docs/blocked-ranges.md) lists every refused range.
 
-- An IP literal `netip.ParseAddr` accepts, carrying **no zone identifier**. A
-  zone scopes an address to one interface, so it is meaningless on a global
-  address; the WHATWG URL Standard omits zone support from host parsing for the
-  same reason.
-- A DNS name: at most 253 bytes, two or more labels, each label 1 to 63 bytes of
-  ASCII letters, digits, hyphen or underscore, not beginning or ending with a
-  hyphen, optionally with one trailing root dot. A name whose rightmost label is
-  numeric is treated as an IPv4 address rather than a domain, per WHATWG's
-  [ends in a number](https://url.spec.whatwg.org/#ends-in-a-number-checker)
-  rule, which is what refuses `0177.0.0.1`, `0x7f.0.0.1`, `127.1` and
-  `192.168.257`.
+## Ports, redirects and logging
 
-**Why an allowlist.** Standard IDNA processing rewrites some hosts into others.
-UTS-46 deletes format characters such as U+200B ZERO WIDTH SPACE and U+00AD SOFT
-HYPHEN, so `169.254.169.254\u200b` becomes the cloud metadata address; and it maps
-fullwidth and circled digits to ASCII, so `１６９.254.169.254` becomes the same
-thing. A blocklist would have to enumerate those runes and would lose to the next
-one added; refusing every byte outside the label set closes the whole class.
+`SafeTransport` connects to port 443 only, unless you list other ports with `WithAllowedPorts`. The list replaces the default, and a call with no ports keeps 443. No option allows every port. If you learn the port only at run time, validate the destination first, then build a transport that allows that one port.
 
-**Two consequences worth knowing.** Non-ASCII hosts are refused rather than
-converted, so convert an internationalized name to its `xn--` A-label before
-validating; ssrf will not guess, because a validator that canonicalizes
-differently from your HTTP client is how bypasses happen. And bracketed authority
-syntax (`[::1]`) is refused, because these functions take a host: use
-`url.Hostname()` or `net.SplitHostPort` first. `ValidateURL` already does.
+The redirect policies refuse a hop with the hop's own `Kind`, such as `KindBadScheme`. The transport sets no proxy, so it ignores `HTTP_PROXY` and `HTTPS_PROXY` and connects to the destination itself.
 
-Scheme and host matching is case-insensitive over ASCII and byte-exact outside
-it, which is the whole of the RFC 3986 scheme grammar and the RFC 1035 hostname
-grammar (an internationalized name arrives as an `xn--` A-label). Folding wider
-lets a rune the grammar excludes match a literal: `strings.EqualFold` treats
-`localhoſt` as `localhost`. Folding over ASCII also keeps these verdicts
-independent of the toolchain's Unicode tables.
+The validation functions log nothing. Each transport or redirect refusal logs one `Warn` line through `slog`'s default logger, with a bounded `reason` attribute and its untrusted values sanitized. [The transport](docs/transport.md) covers the options, defaults and log lines.
 
-### Transport options
+## Unsupported by design
 
-- `WithAddressPolicy(AddressPolicy) TransportOption`: inject a custom allow/deny IP predicate
-- `WithDialer(*net.Dialer) TransportOption`: inject a custom net.Dialer
-- `WithResolver(Resolver) TransportOption`: inject a custom DNS resolver
-- `WithAllowedPorts(...uint16) TransportOption`: restrict outbound ports
-  (default: 443 only; passing none keeps the default)
+ssrf has no IP allow or deny lists beyond `WithAddressPolicy`, no hostname allowlist, no Happy Eyeballs fast connect and no response size limit. It also has no blanket `2001::/23` block, no ISATAP unwrapping, no built-in DNS-over-HTTPS resolver and no allow-every-port option. [Unsupported by design](docs/non-goals.md) gives the reason for each and what to use instead.
 
-This library deliberately ships no option to lift the port restriction. An empty
-set refuses every port; it never allows every one. A caller whose peer sits on
-a port it cannot know in advance builds its transport once the destination is
-known and passes that single port: pinning a validated destination is a
-stronger check than any standing permissive policy.
+## Credits
 
-### Structured Errors
+The socket-time check uses a `net.Dialer` `Control` hook the way [safedialer](https://github.com/mccutchen/safedialer) and [safeurl](https://github.com/doyensec/safeurl) do. safedialer adapts Andrew Ayer's 2019 post on preventing SSRF in Go. The typed error kinds and the port allowlist with no allow-all setting also follow safeurl.
 
-All errors returned by `ValidateURL`, `SafeTransport`'s dial function, and the redirect policies are `*ssrf.Error` with a `Kind` field:
+## Documentation
 
-| Kind                   | Meaning                                  |
-| ---------------------- | ---------------------------------------- |
-| `KindInvalidURL`       | URL could not be parsed                  |
-| `KindBadScheme`        | Scheme is not in the allowed set         |
-| `KindEmptyHost`        | No host component                        |
-| `KindLocalhost`        | Points to localhost                      |
-| `KindBareHostname`     | Hostname without dots                    |
-| `KindNonPublicIP`      | IP is not globally routable              |
-| `KindDNSFailed`        | DNS resolution failed                    |
-| `KindPolicyDenied`     | Custom policy rejected the IP            |
-| `KindBadPort`          | Port is not in the allowed set           |
-| `KindTooManyRedirects` | Redirect chain exceeded the 10-hop limit |
-| `KindInvalidHost`      | Not a canonical host at all              |
-
-When a redirect is blocked because the target URL failed validation, the policy
-propagates the underlying `Kind` (e.g. `KindBadScheme`), so `errors.As(&ssrf.Error)`
-on a `CheckRedirect` error reports the real reason rather than a blanket value.
-
-`KindInvalidHost` and `KindNonPublicIP` answer different questions, and the
-difference decides your remedy. `KindNonPublicIP` means a well-formed host that
-points somewhere private, so the URL is the problem. `KindInvalidHost` means the
-string is not a host: a non-ASCII or otherwise illegal byte, bracketed authority
-syntax, an oversized name or label, or an IP literal carrying a zone identifier.
-For that one, normalize your input (an `xn--` A-label, `url.Hostname()`) rather
-than looking for a different destination.
-
-### Defense-in-Depth: Dialer.Control Hook
-
-The transport uses **two layers** of IP validation:
-
-1. **Resolve-once.** DNS is resolved once, all IPs validated, then the dialer connects to the literal IP (prevents DNS rebinding via TOCTOU).
-2. **`net.Dialer.Control` hook.** Validates the actually-connected IP at socket creation time, after the OS has resolved the address but before the TCP handshake. This mirrors the canonical pattern from [doyensec/safeurl](https://github.com/doyensec/safeurl), [Stripe smokescreen](https://github.com/stripe/smokescreen), and [mccutchen/safedialer](https://github.com/mccutchen/safedialer).
-
-### Logging
-
-**Validation does not log.** `ValidateURL`, `URLPolicy.Validate` and `IsPublicHost` return their verdict and nothing else: the returned `*Error` carries `Kind`, `Host`, `Msg` and `Err`, so you already hold everything a log line could say, and whether to record it is your decision, at your level, through your logger. A validator that wrote to a global sink you cannot see or silence would be making that decision for you.
-
-**The transport logs, because you cannot see its refusals otherwise.** The dial path, the `Control` hook and the redirect policy run inside `net/http`, where a rejection can be retried or wrapped past recognition before it reaches you. Each emits a single `Warn` (`ssrf dial blocked`, `ssrf control blocked`, `ssrf redirect blocked`) through `log/slog`'s default logger, with a bounded snake_case `reason` attribute (`non_public_ip`, `bad_port`, `too_many_redirects`, and so on) suitable for dashboard aggregation. There is no logger to inject.
-
-Every untrusted value in those lines is sanitized and length-bounded first. A host, address, URL or port you pass in is attacker-influenced by definition — that is what an SSRF guard is for — and `slog`'s JSONHandler escapes only what JSON requires, so C1 controls, Unicode bidi controls and U+2028/U+2029 would otherwise reach your log pipeline intact. Each value is capped at the longest legal length for its kind (253 bytes for a host, the maximum DNS name, so a real host is never truncated), which also stops one refusal writing an attacker-sized record.
-
-If you want a rejected host in your own logs, take it from the error rather than the log line:
-
-```go
-if err := ssrf.ValidateURL(raw); err != nil {
-    var serr *ssrf.Error
-    if errors.As(err, &serr) {
-        // serr.Host is the RAW host, for matching and dedupe. Sanitize it
-        // before it reaches a log sink or a rendered page: runesafe.
-        slog.Warn("refused an outbound URL",
-            "host", runesafe.SanitizeSingleLineBounded(serr.Host, 253),
-            "kind", serr.Kind)
-    }
-}
-```
-
-### Blocked IP Ranges
-
-IPv4 (RFC 6890 + RFC 5737 + RFC 2544):
-
-- RFC 1918 private, loopback, link-local, multicast, unspecified
-- `0.0.0.0/8` (this host), `240.0.0.0/4` (reserved/broadcast)
-- `100.64.0.0/10` (CGNAT, RFC 6598)
-- `192.0.0.0/24` (IETF Protocol Assignments)
-- `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` (TEST-NET 1/2/3)
-- `198.18.0.0/15` (Benchmarking)
-- `192.88.99.0/24` (deprecated 6to4 relay)
-
-IPv6:
-
-- Loopback, ULA, link-local, multicast, unspecified
-- `fec0::/10` (deprecated site-local, RFC 3879)
-- `100::/64` (Discard-Only, RFC 6666)
-- `2001:2::/48` (Benchmarking, RFC 5180)
-- `2001:db8::/32` (Documentation, RFC 3849)
-- `3fff::/20` (Documentation, RFC 9637)
-- `5f00::/16` (SRv6 SIDs, RFC 9602)
-
-IPv6 transition mechanisms (embedded IPv4 extracted and re-validated):
-
-- `2002::/16` (6to4, RFC 3056)
-- `64:ff9b::/96` (NAT64 well-known, RFC 6052)
-- `64:ff9b:1::/48` (NAT64 local, RFC 8215; blocked outright)
-- `2001::/32` (Teredo, RFC 4380; embedded client and server IPv4s validated)
-- `::/96` (deprecated IPv4-compatible)
-
-## Unsupported by Design
-
-The following features are intentionally NOT implemented:
-
-| Feature                     | Rationale                                                                                                    |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| Custom allow/deny IP lists  | `WithAddressPolicy(func(netip.Addr) bool)` already provides this                                             |
-| Hostname allowlist/denylist | Application-layer policy, not core SSRF defense                                                              |
-| Happy Eyeballs (RFC 8305)   | Security library prioritizes correctness over speed                                                          |
-| Response body size limit    | Use `io.LimitReader` at the application layer                                                                |
-| Blanket `2001::/23` block   | Overly broad; some sub-allocations are globally reachable. We block specific non-routable sub-ranges instead |
-| ISATAP embedded IPv4        | Uses `fe80::/64` (already blocked) or routable prefixes where embedded IPv4 is informational only            |
-| DNS-over-HTTPS/TLS resolver | `WithResolver` enables plugging in any resolver implementation                                               |
-
-## Security
-
-See the [security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) for vulnerability reporting.
+- [Host validation](docs/host-validation.md) defines which hosts pass and why.
+- [The transport and redirect policies](docs/transport.md) covers both checks, the options, the defaults and the log lines.
+- [Error kinds](docs/errors.md) lists every `Kind` and the remedy each one asks for.
+- [Blocked address ranges](docs/blocked-ranges.md) lists every refused IPv4 and IPv6 range.
+- [Unsupported by design](docs/non-goals.md) lists the features left out on purpose, with the reasons.
 
 ## Contributing
 
-Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
-conventions and how to run the checks locally.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions and how to run the checks locally. Report a vulnerability privately, as the [security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) describes.
 
 ## Disclaimer
 
