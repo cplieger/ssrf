@@ -110,7 +110,7 @@ The socket-time check uses a `net.Dialer` `Control` hook the way [safedialer](ht
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions and how to run the checks locally. Report a vulnerability privately, as the [security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) describes.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
