@@ -16,7 +16,7 @@ func newTestReq(rawURL string) (*http.Request, error) {
 func TestSafeRedirectPolicy_blocks_private_redirect(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("https://192.168.1.77/internal")
+	req, _ := newTestReq("https://192.168.1.20/internal")
 	err := policy(req, nil)
 	if err == nil {
 		t.Error("SafeRedirectPolicy() = nil, want error for private redirect")
@@ -84,7 +84,7 @@ func TestSafeRedirectPolicy_propagates_inner_kind(t *testing.T) {
 		want ErrorKind
 	}{
 		{"http downgrade", "http://example.com/file.txt", KindBadScheme},
-		{"private IP", "https://192.168.1.77/internal", KindNonPublicIP},
+		{"private IP", "https://192.168.1.20/internal", KindNonPublicIP},
 		{"bare hostname", "https://internal/file", KindBareHostname},
 		{"localhost", "https://localhost/file", KindLocalhost},
 		{"empty host", "https:///file", KindEmptyHost},
@@ -298,7 +298,7 @@ func TestURLPolicyRedirectPolicy_classifiesCallerBuiltURLFields(t *testing.T) {
 		url  *url.URL
 		want ErrorKind
 	}{
-		{"private host", &url.URL{Scheme: "https", Host: "192.168.1.77", Path: "/internal"}, KindNonPublicIP},
+		{"private host", &url.URL{Scheme: "https", Host: "192.168.1.20", Path: "/internal"}, KindNonPublicIP},
 		{"localhost", &url.URL{Scheme: "https", Host: "localhost", Path: "/x"}, KindLocalhost},
 		{"bare hostname", &url.URL{Scheme: "https", Host: "internal", Path: "/x"}, KindBareHostname},
 		{"empty host", &url.URL{Scheme: "https", Path: "/x"}, KindEmptyHost},

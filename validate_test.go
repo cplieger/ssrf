@@ -43,7 +43,7 @@ func TestValidateURL(t *testing.T) {
 
 		// IPv4 private/reserved.
 		{"loopback IP rejected", "https://127.0.0.1/file.txt", true},
-		{"private 192.168 rejected", "https://192.168.1.77/file.txt", true},
+		{"private 192.168 rejected", "https://192.168.1.20/file.txt", true},
 		{"private 10.x rejected", "https://10.0.0.1/file.txt", true},
 		{"private 172.16 rejected", "https://172.16.0.1/file.txt", true},
 		{"link-local rejected", "https://169.254.1.1/file.txt", true},
