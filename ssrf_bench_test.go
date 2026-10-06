@@ -720,37 +720,15 @@ func TestHostValidationCostIsIndependentOfHostSize(t *testing.T) {
 	}
 }
 
-// TestRefusalCostDoesNotGrowWithTheHost holds the property that matters on the
-// one path where allocation-freedom is not available, and where the input is by
-// definition the attacker's.
-//
-// Every rejection builds a *ssrf.Error carrying a message that interpolates the
-// offending host. So a refusal allocates, and unlike the classes above its count
-// is not perfectly flat: the measured shape is 6 allocations for ValidateURL
-// from a 16-byte bare hostname through a 4 KiB one, then 9 at 64 KiB, as
-// fmt.Sprintf doubles its buffer. That is logarithmic in the payload.
-//
-// Logarithmic is not amplification, and the distinction is the whole point of
-// the test. An attacker who can make a refusal a hundred times more expensive by
-// sending a hundred times more host has found an amplification vector inside the
-// SSRF guard. One who can add three allocations by sending four thousand times
-// more host has not. So the assertion is a ceiling plus a bound on GROWTH across
-// the ladder, rather than the equality the flat classes get.
-//
-// Byte volume still grows with the input HERE, because the error message
-// contains the host, and this test deliberately does not gate that: the *Error
-// goes to the caller, which chose to pass the host in and can bound it on the
-// way out. What changed is that the volume no longer reaches a log sink. This
-// path stopped logging entirely, and every attribute the transport paths do log
-// runs through a ForLog helper that caps it (hostForLog and friends), so the
-// library no longer writes attacker-sized data anywhere on its own initiative.
-// The count is still what this test measures, because keeping the WORK bounded
-// is the property an allocation ladder can hold.
+// TestRefusalCostDoesNotGrowWithTheHost bounds allocation GROWTH on refusal,
+// where the input is the attacker's. A refusal builds an *Error whose message
+// interpolates the host, so it allocates, and the check is a ceiling plus a
+// growth bound across payloadLadder (checkBoundedRefusal) rather than equality.
+// Byte volume is not gated: the *Error goes to the caller, and this path logs
+// nothing.
 func TestRefusalCostDoesNotGrowWithTheHost(t *testing.T) {
-	// The validation path under test no longer logs, so the pinned handler is
-	// belt-and-braces here rather than load-bearing: it keeps the measurement
-	// honest if a log call is ever reintroduced, and TestValidationPathIsSilent
-	// is what actually fails in that case.
+	// Pinned so a reintroduced log call cannot skew the count;
+	// TestValidationPathIsSilent is what fails in that case.
 	pinBlockLogger(t)
 
 	// Each builder returns a HOST that must be refused, so the rejected string

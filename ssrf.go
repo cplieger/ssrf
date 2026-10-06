@@ -90,9 +90,13 @@ const (
 	// KindInvalidHost indicates the host is not a canonical host at all: it
 	// carries a byte no DNS label may hold, or an IP literal carries a zone
 	// identifier. Distinct from KindNonPublicIP, which means a well-formed host
-	// that points somewhere private. Appended last so the iota values above it
-	// keep the numbers consumers already branch on.
+	// that points somewhere private. Appended after the other Kinds so the iota
+	// values above it keep the numbers consumers already branch on.
 	KindInvalidHost
+
+	// kindEnd is one past the last Kind. It must stay last: the exhaustive
+	// Kind tests iterate up to it, so a Kind declared below it goes unchecked.
+	kindEnd
 )
 
 // Error is a structured SSRF validation error with a machine-readable Kind.
@@ -1011,12 +1015,11 @@ func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKin
 	}
 	return func(network, address string, _ syscall.RawConn) error {
 		if network != "tcp4" && network != "tcp6" {
-			// network is the ONE string this package logs without a ForLog
-			// helper: net/http supplies it from its own constants ("tcp",
-			// "tcp4", "tcp6"), it is not host-shaped, and it has no path from
-			// caller input. Every other string in a slog call here goes through
-			// a helper, which is what makes the sweep in
-			// TestLogAttributesAreSanitizedAndBounded mechanical.
+			// network is logged without a ForLog helper: net/http supplies it
+			// from its own constants ("tcp", "tcp4", "tcp6"), so it has no path
+			// from caller input. TestTransportRefusalLogsAreSafe drives only the
+			// refusal sites that log caller-derived text, so it has no case for
+			// this branch.
 			slog.Default().Warn("ssrf control blocked", "network", network, "reason", "disallowed_network")
 			return ssrfErr(KindNonPublicIP, "", fmt.Sprintf("SSRF control: disallowed network %q", network), nil)
 		}

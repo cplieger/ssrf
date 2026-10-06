@@ -70,13 +70,17 @@ func TestError_Unwrap_chain(t *testing.T) {
 
 // TestErrorKind_constants_distinct_and_nonzero verifies the iota-based Kind
 // constants stay distinct and non-zero (a zero Kind would collide with the
-// unset value an unwrapped error reports).
+// unset value an unwrapped error reports). The list is checked against
+// kindEnd so a Kind added to the const block but not here fails.
 func TestErrorKind_constants_distinct_and_nonzero(t *testing.T) {
 	t.Parallel()
 	kinds := []ErrorKind{
 		KindInvalidURL, KindBadScheme, KindEmptyHost, KindLocalhost,
 		KindBareHostname, KindNonPublicIP, KindDNSFailed, KindPolicyDenied,
-		KindBadPort, KindTooManyRedirects,
+		KindBadPort, KindTooManyRedirects, KindInvalidHost,
+	}
+	if want := int(kindEnd - KindInvalidURL); len(kinds) != want {
+		t.Errorf("kinds lists %d constants, want %d (KindInvalidURL..kindEnd): add the new Kind here", len(kinds), want)
 	}
 	seen := make(map[ErrorKind]bool, len(kinds))
 	for _, k := range kinds {
@@ -107,6 +111,7 @@ func TestReasonLabel(t *testing.T) {
 		{"policy denied", "policy_denied", KindPolicyDenied},
 		{"bad port", "bad_port", KindBadPort},
 		{"too many redirects", "too_many_redirects", KindTooManyRedirects},
+		{"invalid host", "invalid_host", KindInvalidHost},
 		{"unknown zero value", "blocked", ErrorKind(0)},
 		{"unknown high value", "blocked", ErrorKind(999)},
 	}
@@ -123,7 +128,7 @@ func TestReasonLabel(t *testing.T) {
 func TestReasonLabel_exhaustive(t *testing.T) {
 	t.Parallel()
 	seen := make(map[string]ErrorKind)
-	for k := KindInvalidURL; k <= KindTooManyRedirects; k++ {
+	for k := KindInvalidURL; k < kindEnd; k++ {
 		label := reasonLabel(k)
 		if label == "blocked" {
 			t.Errorf("reasonLabel(%d) hit the default %q; add a dedicated case", k, label)

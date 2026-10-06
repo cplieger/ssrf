@@ -114,6 +114,7 @@ var independentBlockedRanges = []blockedRange{
 	{netip.MustParsePrefix("2001:db8::/32"), "Documentation6"},
 	{netip.MustParsePrefix("3fff::/20"), "Documentation6New"},
 	{netip.MustParsePrefix("5f00::/16"), "SRv6SIDs"},
+	{netip.MustParsePrefix("fec0::/10"), "SiteLocal6"},
 	// NAT64 local (RFC 8215)
 	{netip.MustParsePrefix("64:ff9b:1::/48"), "NAT64Local"},
 	// 6to4 relay anycast (RFC 7526)
@@ -240,6 +241,7 @@ func FuzzIsPublicAddr(f *testing.F) {
 	f.Add(addr16(netip.MustParseAddr("2001:db8::1")))            // documentation
 	f.Add(addr16(netip.MustParseAddr("3fff::1")))                // doc new
 	f.Add(addr16(netip.MustParseAddr("5f00::1")))                // SRv6
+	f.Add(addr16(netip.MustParseAddr("fec0::1")))                // site-local
 	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::192.168.1.1"))) // nat64 local
 	f.Add(addr16(netip.MustParseAddr("64:ff9b:1::a00:1")))       // nat64Local with 10.0.0.1
 	f.Add(addr16(netip.MustParseAddr("::a00:1")))                // ipv4Compat with 10.0.0.1
