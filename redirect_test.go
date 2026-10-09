@@ -1,22 +1,25 @@
 package ssrf
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"net/url"
 	"testing"
 )
 
-// newTestReq builds a GET request for redirect-policy tests.
-func newTestReq(rawURL string) (*http.Request, error) {
-	return http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, http.NoBody)
+func newTestReq(t *testing.T, rawURL string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, rawURL, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext(%q): %v", rawURL, err)
+	}
+	return req
 }
 
 func TestSafeRedirectPolicy_blocks_private_redirect(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("https://192.168.1.20/internal")
+	req := newTestReq(t, "https://192.168.1.20/internal")
 	err := policy(req, nil)
 	if err == nil {
 		t.Error("SafeRedirectPolicy() = nil, want error for private redirect")
@@ -26,7 +29,7 @@ func TestSafeRedirectPolicy_blocks_private_redirect(t *testing.T) {
 func TestSafeRedirectPolicy_blocks_http_downgrade(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("http://example.com/file.txt")
+	req := newTestReq(t, "http://example.com/file.txt")
 	err := policy(req, nil)
 	if err == nil {
 		t.Error("SafeRedirectPolicy() = nil, want error for http scheme downgrade")
@@ -36,7 +39,7 @@ func TestSafeRedirectPolicy_blocks_http_downgrade(t *testing.T) {
 func TestSafeRedirectPolicy_allows_public_redirect(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("https://cdn.example.com/file.txt")
+	req := newTestReq(t, "https://cdn.example.com/file.txt")
 	err := policy(req, nil)
 	if err != nil {
 		t.Errorf("SafeRedirectPolicy() = %v, want nil for public redirect", err)
@@ -46,7 +49,7 @@ func TestSafeRedirectPolicy_allows_public_redirect(t *testing.T) {
 func TestSafeRedirectPolicy_stops_after_10_redirects(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	via := make([]*http.Request, 10)
 	err := policy(req, via)
 	if err == nil {
@@ -59,7 +62,7 @@ func TestSafeRedirectPolicy_stops_after_10_redirects(t *testing.T) {
 func TestSafeRedirectPolicy_hop_cap_kind(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	via := make([]*http.Request, maxRedirects)
 	err := policy(req, via)
 
@@ -92,7 +95,7 @@ func TestSafeRedirectPolicy_propagates_inner_kind(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req, _ := newTestReq(tc.url)
+			req := newTestReq(t, tc.url)
 			err := policy(req, nil)
 			ssrfErr, ok := errors.AsType[*Error](err)
 			if !ok {
@@ -115,7 +118,7 @@ func TestSafeRedirectPolicy_caps_redirects_with_custom_next(t *testing.T) {
 		return nil
 	}
 	policy := SafeRedirectPolicy(next)
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	via := make([]*http.Request, 10)
 	err := policy(req, via)
 	if err == nil {
@@ -134,7 +137,7 @@ func TestSafeRedirectPolicy_delegates_to_next(t *testing.T) {
 		return nil
 	}
 	policy := SafeRedirectPolicy(next)
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	err := policy(req, nil)
 	if err != nil {
 		t.Errorf("SafeRedirectPolicy() = %v, want nil", err)
@@ -151,7 +154,7 @@ func TestSafeRedirectPolicy_propagates_next_error(t *testing.T) {
 		return nextErr
 	}
 	policy := SafeRedirectPolicy(next)
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	err := policy(req, nil)
 	if !errors.Is(err, nextErr) {
 		t.Errorf("SafeRedirectPolicy() = %v, want %v", err, nextErr)
@@ -161,7 +164,7 @@ func TestSafeRedirectPolicy_propagates_next_error(t *testing.T) {
 func TestSafeRedirectPolicy_nil_next_under_limit_allows(t *testing.T) {
 	t.Parallel()
 	policy := SafeRedirectPolicy(nil)
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	via := make([]*http.Request, 5) // under 10
 	err := policy(req, via)
 	if err != nil {
@@ -172,7 +175,7 @@ func TestSafeRedirectPolicy_nil_next_under_limit_allows(t *testing.T) {
 func TestURLPolicyRedirectPolicy_blocks_disallowed(t *testing.T) {
 	t.Parallel()
 	policy := NewURLPolicy("https").RedirectPolicy(nil)
-	req, _ := newTestReq("http://example.com/f")
+	req := newTestReq(t, "http://example.com/f")
 	err := policy(req, nil)
 	if err == nil {
 		t.Error("redirect to http should be blocked")
@@ -182,7 +185,7 @@ func TestURLPolicyRedirectPolicy_blocks_disallowed(t *testing.T) {
 func TestURLPolicyRedirectPolicy_allows_configured(t *testing.T) {
 	t.Parallel()
 	policy := NewURLPolicy("https", "http").RedirectPolicy(nil)
-	req, _ := newTestReq("http://example.com/f")
+	req := newTestReq(t, "http://example.com/f")
 	err := policy(req, nil)
 	if err != nil {
 		t.Errorf("redirect to http should be allowed, got: %v", err)
@@ -198,7 +201,7 @@ func TestURLPolicyRedirectPolicy_caps_and_delegates(t *testing.T) {
 	}
 	policy := URLPolicy{}.RedirectPolicy(next)
 
-	req, _ := newTestReq("https://example.com/file")
+	req := newTestReq(t, "https://example.com/file")
 	via := make([]*http.Request, 10)
 	if err := policy(req, via); err == nil {
 		t.Error("URLPolicy.RedirectPolicy() = nil, want error at 10-redirect cap")
@@ -221,11 +224,11 @@ func TestURLPolicyRedirectPolicy_caps_and_delegates(t *testing.T) {
 func TestNewURLPolicy_empty_is_https_default(t *testing.T) {
 	t.Parallel()
 	policy := NewURLPolicy().RedirectPolicy(nil)
-	req, _ := newTestReq("http://example.com/evil")
+	req := newTestReq(t, "http://example.com/evil")
 	if err := policy(req, nil); err == nil {
 		t.Error("NewURLPolicy() should retain the HTTPS-only default, blocking http")
 	}
-	req2, _ := newTestReq("https://example.com/ok")
+	req2 := newTestReq(t, "https://example.com/ok")
 	if err := policy(req2, nil); err != nil {
 		t.Errorf("HTTPS to public domain should pass, got: %v", err)
 	}
@@ -236,11 +239,11 @@ func TestNewURLPolicy_empty_is_https_default(t *testing.T) {
 func TestURLPolicy_zero_value_is_https_default(t *testing.T) {
 	t.Parallel()
 	policy := URLPolicy{}.RedirectPolicy(nil)
-	req, _ := newTestReq("http://example.com/evil")
+	req := newTestReq(t, "http://example.com/evil")
 	if err := policy(req, nil); err == nil {
 		t.Error("zero-value URLPolicy should default to HTTPS-only, blocking http")
 	}
-	req2, _ := newTestReq("https://example.com/ok")
+	req2 := newTestReq(t, "https://example.com/ok")
 	if err := policy(req2, nil); err != nil {
 		t.Errorf("HTTPS to public domain should pass, got: %v", err)
 	}
