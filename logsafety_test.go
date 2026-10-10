@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,36 +192,36 @@ func TestTransportRefusalLogsAreSafe(t *testing.T) {
 
 	cases := map[string]func(t *testing.T){
 		"dial invalid address": func(t *testing.T) {
-			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts)
+			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts, nil)
 			// No port separator, so SplitHostPort fails.
 			_, _ = dial(t.Context(), "tcp", hostile)
 		},
 		"dial bad port": func(t *testing.T) {
-			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts)
+			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts, nil)
 			_, _ = dial(t.Context(), "tcp", net.JoinHostPort(hostile, "not-a-port"+huge))
 		},
 		"dial port not allowed": func(t *testing.T) {
-			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts)
+			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts, nil)
 			_, _ = dial(t.Context(), "tcp", net.JoinHostPort(hostile, "9999"))
 		},
 		"dial dns failed": func(t *testing.T) {
 			r := &mockResolver{err: &net.DNSError{Err: "no such host" + hostileRunes, Name: hostile}}
-			dial := safeDialContext(&net.Dialer{}, isPublicAddr, r, controlPorts)
+			dial := safeDialContext(&net.Dialer{}, isPublicAddr, r, controlPorts, nil)
 			_, _ = dial(t.Context(), "tcp", net.JoinHostPort(hostile, "443"))
 		},
 		"dial no ips resolved": func(t *testing.T) {
-			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts)
+			dial := safeDialContext(&net.Dialer{}, isPublicAddr, &mockResolver{}, controlPorts, nil)
 			_, _ = dial(t.Context(), "tcp", net.JoinHostPort(hostile, "443"))
 		},
 		"dial resolved ip denied": func(t *testing.T) {
 			r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("169.254.169.254")}}
-			dial := safeDialContext(&net.Dialer{}, isPublicAddr, r, controlPorts)
+			dial := safeDialContext(&net.Dialer{}, isPublicAddr, r, controlPorts, nil)
 			_, _ = dial(t.Context(), "tcp", net.JoinHostPort(hostile, "443"))
 		},
 		"dial capped": func(t *testing.T) {
 			r := &mockResolver{ips: loopbackIPs(maxDialIPs + 1)}
 			dial := safeDialContext(&net.Dialer{Timeout: 50 * time.Millisecond},
-				func(netip.Addr) bool { return true }, r, map[uint16]struct{}{1: {}})
+				func(netip.Addr) bool { return true }, r, map[uint16]struct{}{1: {}}, nil)
 			_, _ = dial(t.Context(), "tcp", net.JoinHostPort(hostile, "1"))
 		},
 		"redirect blocked": func(t *testing.T) {
@@ -233,11 +234,11 @@ func TestTransportRefusalLogsAreSafe(t *testing.T) {
 			_ = policy(req, nil)
 		},
 		"control unparseable ip": func(t *testing.T) {
-			ctrl := safeControl(isPublicAddr, controlPorts)
+			ctrl := safeControl(isPublicAddr, controlPorts, nil)
 			_ = ctrl("tcp4", net.JoinHostPort(hostile, "443"), nil)
 		},
 		"control invalid address": func(t *testing.T) {
-			ctrl := safeControl(isPublicAddr, controlPorts)
+			ctrl := safeControl(isPublicAddr, controlPorts, nil)
 			_ = ctrl("tcp4", hostile, nil)
 		},
 	}
@@ -267,6 +268,120 @@ func TestTransportRefusalLogsAreSafe(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A transport built WithLogger writes its dial and Control refusals to that
+// logger and nothing to the default, so a caller running one transport per
+// peer can attribute each line; without it they go to the default.
+func TestWithLogger_routesTransportRefusals(t *testing.T) {
+	private := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}
+	cases := map[string]struct {
+		resolver Resolver
+		url      string
+		wantMsg  string
+		opts     []TransportOption
+	}{
+		"resolved ip denied": {resolver: private, url: "https://h.example.com/", wantMsg: "ssrf dial blocked"},
+		"port not allowed":   {resolver: private, url: "https://h.example.com:8443/", wantMsg: "ssrf dial blocked"},
+		"dns failed": {
+			resolver: &mockResolver{err: &net.DNSError{Err: "no such host", Name: "h.example.com"}},
+			url:      "https://h.example.com/", wantMsg: "ssrf dial blocked",
+		},
+		"dial capped": {
+			resolver: &mockResolver{ips: loopbackIPs(maxDialIPs + 1)},
+			url:      "https://h.example.com:1/", wantMsg: "ssrf dial capped",
+			opts: []TransportOption{
+				WithAllowedPorts(1), WithAddressPolicy(func(netip.Addr) bool { return true }),
+				WithDialer(&net.Dialer{Timeout: 50 * time.Millisecond}),
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			def := captureJSON(t)
+			var own bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&own, nil)).With("peer", "hub")
+			opts := append([]TransportOption{WithLogger(logger), WithResolver(tc.resolver)}, tc.opts...)
+			client := &http.Client{Transport: SafeTransport(opts...)}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tc.url, http.NoBody)
+			if err != nil {
+				t.Fatalf("Setup: NewRequest: %v", err)
+			}
+			if resp, err := client.Do(req); err == nil {
+				_ = resp.Body.Close()
+				t.Fatalf("Do(%s) succeeded, want a refusal", tc.url)
+			}
+			if got := own.String(); !strings.Contains(got, `"msg":"`+tc.wantMsg+`"`) || !strings.Contains(got, `"peer":"hub"`) {
+				t.Errorf("WithLogger's logger got %q, want a %q line carrying peer=hub", got, tc.wantMsg)
+			}
+			if def.Len() != 0 {
+				t.Errorf("slog.Default got %q, want nothing once WithLogger is set", def.String())
+			}
+		})
+	}
+
+	t.Run("control hook", func(t *testing.T) {
+		def := captureJSON(t)
+		var own bytes.Buffer
+		// The policy admits the address at resolve time and refuses it at the
+		// socket, the rebinding shape only the Control hook catches.
+		var calls atomic.Int32
+		policy := func(netip.Addr) bool { return calls.Add(1) == 1 }
+		public := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("192.0.2.1")}}
+		client := &http.Client{Transport: SafeTransport(WithLogger(slog.New(slog.NewJSONHandler(&own, nil))),
+			WithResolver(public), WithAddressPolicy(policy))}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://h.example.com/", http.NoBody)
+		if err != nil {
+			t.Fatalf("Setup: NewRequest: %v", err)
+		}
+		if resp, err := client.Do(req); err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("Do succeeded, want the Control hook's refusal")
+		}
+		if !strings.Contains(own.String(), `"msg":"ssrf control blocked"`) {
+			t.Errorf("control logger got %q, want an ssrf control blocked line", own.String())
+		}
+		if def.Len() != 0 {
+			t.Errorf("slog.Default got %q, want nothing once a logger is set", def.String())
+		}
+	})
+
+	t.Run("nil keeps the default", func(t *testing.T) {
+		def := captureJSON(t)
+		client := &http.Client{Transport: SafeTransport(WithLogger(nil), WithResolver(private))}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://h.example.com/", http.NoBody)
+		if err != nil {
+			t.Fatalf("Setup: NewRequest: %v", err)
+		}
+		if resp, err := client.Do(req); err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("Do succeeded, want a refusal")
+		}
+		if !strings.Contains(def.String(), `"msg":"ssrf dial blocked"`) {
+			t.Errorf("slog.Default got %q, want the refusal under WithLogger(nil)", def.String())
+		}
+	})
+
+	t.Run("a later nil keeps the earlier logger", func(t *testing.T) {
+		def := captureJSON(t)
+		var own bytes.Buffer
+		client := &http.Client{Transport: SafeTransport(WithLogger(slog.New(slog.NewJSONHandler(&own, nil))),
+			WithLogger(nil), WithResolver(private))}
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://h.example.com/", http.NoBody)
+		if err != nil {
+			t.Fatalf("Setup: NewRequest: %v", err)
+		}
+		if resp, err := client.Do(req); err == nil {
+			_ = resp.Body.Close()
+			t.Fatal("Do succeeded, want a refusal")
+		}
+		if !strings.Contains(own.String(), `"msg":"ssrf dial blocked"`) {
+			t.Errorf("first logger got %q, want the refusal after WithLogger(own), WithLogger(nil)", own.String())
+		}
+		if def.Len() != 0 {
+			t.Errorf("slog.Default got %q, want nothing: the nil option is ignored", def.String())
+		}
+	})
 }
 
 // maxLogLine is the ceiling one refusal record may occupy. It is the sum of the

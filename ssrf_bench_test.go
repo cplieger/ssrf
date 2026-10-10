@@ -226,7 +226,7 @@ func BenchmarkValidateURL_BadScheme(b *testing.B) {
 // weekly run pays for.
 
 func BenchmarkSafeControl_AcceptedIP(b *testing.B) {
-	control := safeControl(isPublicAddr, map[uint16]struct{}{443: {}})
+	control := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
 	b.ReportAllocs()
 	for b.Loop() {
 		if err := control("tcp4", "8.8.8.8:443", nil); err != nil {
@@ -511,7 +511,7 @@ func TestIsPublicHostIsAllocationFreeForIPLiterals(t *testing.T) {
 // BenchmarkSafeControl series at all, so today nothing would notice this path
 // starting to allocate per connection.
 func TestControlHookAcceptPathIsAllocationFree(t *testing.T) {
-	control := safeControl(isPublicAddr, controlPorts)
+	control := safeControl(isPublicAddr, controlPorts, nil)
 
 	for class, tc := range controlAcceptClasses {
 		t.Run(class, func(t *testing.T) {
@@ -542,7 +542,7 @@ func TestControlHookAcceptPathIsAllocationFree(t *testing.T) {
 // wrapping the caller's policy per call would show up here.
 func TestControlHookAcceptPathIsAllocationFreeUnderACustomPolicy(t *testing.T) {
 	allowAll := func(netip.Addr) bool { return true }
-	control := safeControl(allowAll, controlPorts)
+	control := safeControl(allowAll, controlPorts, nil)
 	const network, address = "tcp4", "10.0.0.1:443"
 
 	if err := control(network, address, nil); err != nil {
@@ -796,15 +796,15 @@ func TestResolvedAddressValidationCostIsIndependentOfAnswerSize(t *testing.T) {
 		poisoned[k-1] = netip.MustParseAddr("169.254.169.254") // cloud metadata service
 
 		publicResolver := &mockResolver{ips: public}
-		if _, err := resolveAndValidate(ctx, publicResolver, isPublicAddr, "h.example.com", KindNonPublicIP); err != nil {
+		if _, err := resolveAndValidate(ctx, publicResolver, isPublicAddr, nil, "h.example.com", KindNonPublicIP); err != nil {
 			t.Fatalf("resolveAndValidate over %d public addresses = %v, want nil: the "+
 				"fixture must witness the ACCEPT path to be measuring it", k, err)
 		}
 		acceptCounts = append(acceptCounts, testing.AllocsPerRun(100, func() {
-			_, errSink = resolveAndValidate(ctx, publicResolver, isPublicAddr, "h.example.com", KindNonPublicIP)
+			_, errSink = resolveAndValidate(ctx, publicResolver, isPublicAddr, nil, "h.example.com", KindNonPublicIP)
 		}))
 
-		dial := safeDialContext(benchDialer, isPublicAddr, &mockResolver{ips: poisoned}, controlPorts)
+		dial := safeDialContext(benchDialer, isPublicAddr, &mockResolver{ips: poisoned}, controlPorts, nil)
 		if _, err := dial(ctx, "tcp", "h.example.com:443"); err == nil {
 			t.Fatalf("dial with a poisoned %d-address answer = nil, want an error: the "+
 				"fixture must witness the REFUSAL path to be measuring it", k)
@@ -860,12 +860,12 @@ func TestRefusalCostIsIndependentOfWhereThePoisonedAddressSits(t *testing.T) {
 	counts := map[string]float64{}
 	for position, answer := range map[string][]netip.Addr{"first": first, "last": last} {
 		resolver := &mockResolver{ips: answer}
-		if _, err := resolveAndValidate(ctx, resolver, isPublicAddr, "h.example.com", KindNonPublicIP); err == nil {
+		if _, err := resolveAndValidate(ctx, resolver, isPublicAddr, nil, "h.example.com", KindNonPublicIP); err == nil {
 			t.Fatalf("resolveAndValidate with the poisoned address %s = nil, want an "+
 				"error: the fixture must witness the REFUSAL path", position)
 		}
 		counts[position] = testing.AllocsPerRun(100, func() {
-			_, errSink = resolveAndValidate(ctx, resolver, isPublicAddr, "h.example.com", KindNonPublicIP)
+			_, errSink = resolveAndValidate(ctx, resolver, isPublicAddr, nil, "h.example.com", KindNonPublicIP)
 		})
 	}
 

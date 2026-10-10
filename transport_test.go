@@ -354,10 +354,10 @@ func TestWithAllowedPorts_empty_retains_default(t *testing.T) {
 func TestEmptyPortSetRefusesEverything(t *testing.T) {
 	t.Parallel()
 	for _, portStr := range []string{"443", "80", "12345", "not-a-port"} {
-		if err := checkAllowedPort(nil, "example.com", portStr, "dial"); err == nil {
+		if err := checkAllowedPort(nil, nil, "example.com", portStr, "dial"); err == nil {
 			t.Errorf("nil port set allowed port %q, want everything refused (fail closed)", portStr)
 		}
-		if err := checkAllowedPort(map[uint16]struct{}{}, "example.com", portStr, "dial"); err == nil {
+		if err := checkAllowedPort(map[uint16]struct{}{}, nil, "example.com", portStr, "dial"); err == nil {
 			t.Errorf("empty port set allowed port %q, want everything refused (fail closed)", portStr)
 		}
 	}

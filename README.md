@@ -68,7 +68,7 @@ if ssrf.IsPublicAddr(netip.MustParseAddr("8.8.8.8")) {
 ## API
 
 - Validation: `ValidateURL`, `IsPublicHost`, `IsPublicAddr`, and `URLPolicy` with `NewURLPolicy` and its `Validate` method.
-- Transport: `SafeTransport` with the options `WithAllowedPorts`, `WithAddressPolicy`, `WithResolver` and `WithDialer`, and the `TransportOption`, `AddressPolicy` and `Resolver` types.
+- Transport: `SafeTransport` with the options `WithAllowedPorts`, `WithAddressPolicy`, `WithResolver`, `WithDialer` and `WithLogger`, and the `TransportOption`, `AddressPolicy` and `Resolver` types.
 - Redirects: `SafeRedirectPolicy` and `URLPolicy.RedirectPolicy`, which check every hop and stop after 10.
 - Errors: `Error`, with its `Kind`, `Host`, `Msg` and `Err` fields, and the `ErrorKind` constants.
 
@@ -90,7 +90,7 @@ ssrf refuses a non-ASCII host instead of converting it, so convert an internatio
 
 The redirect policies refuse a hop with the hop's own `Kind`, such as `KindBadScheme`. The transport sets no proxy, so it ignores `HTTP_PROXY` and `HTTPS_PROXY` and connects to the destination itself.
 
-The validation functions log nothing. Each transport or redirect refusal logs one `Warn` line through `slog`'s default logger, with a bounded `reason` attribute and its untrusted values sanitized. [The transport](docs/transport.md) covers the options, defaults and log lines.
+The validation functions log nothing. Each transport or redirect refusal logs one `Warn` line, with a bounded `reason` attribute and its untrusted values sanitized. Transport lines go to the logger you pass with `WithLogger`, or to `slog`'s default logger. Redirect lines always go to the default logger. [The transport](docs/transport.md) covers the options, defaults and log lines.
 
 ## Unsupported by design
 

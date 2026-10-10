@@ -142,6 +142,7 @@ type transportConfig struct {
 	policy         AddressPolicy
 	dialer         *net.Dialer
 	resolver       Resolver
+	logger         *slog.Logger
 	allowedPorts   map[uint16]struct{}
 	policyIsCustom bool
 }
@@ -183,6 +184,27 @@ func WithResolver(r Resolver) TransportOption {
 			c.resolver = r
 		}
 	}
+}
+
+// WithLogger sets the logger the transport writes its dial and Control
+// refusals to, so a caller running one transport per peer can attribute each
+// line. A nil logger is ignored; with none, each line goes to slog.Default as
+// it is written. The redirect policies are not transport options and keep
+// logging through slog.Default.
+func WithLogger(l *slog.Logger) TransportOption {
+	return func(c *transportConfig) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
+
+// orDefault is l, or slog.Default at the moment of the call when l is nil.
+func orDefault(l *slog.Logger) *slog.Logger {
+	if l != nil {
+		return l
+	}
+	return slog.Default()
 }
 
 // WithAllowedPorts sets the ports that outbound connections may target.
@@ -991,14 +1013,14 @@ func (p URLPolicy) RedirectPolicy(
 // than allowing everything, so a construction bug fails closed. That is why
 // an unparseable port needs no special case — it never reaches a lookup that
 // might have been switched off.
-func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage string) error {
+func checkAllowedPort(allowedPorts map[uint16]struct{}, logger *slog.Logger, host, portStr, stage string) error {
 	p, parseErr := strconv.ParseUint(portStr, 10, 16)
 	if parseErr != nil {
-		slog.Default().Warn("ssrf "+stage+" blocked", "host", hostForLog(host), "port", portForLog(portStr), "reason", "bad_port")
+		orDefault(logger).Warn("ssrf "+stage+" blocked", "host", hostForLog(host), "port", portForLog(portStr), "reason", "bad_port")
 		return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF %s: invalid port %q", stage, portStr), parseErr)
 	}
 	if _, ok := allowedPorts[uint16(p)]; !ok {
-		slog.Default().Warn("ssrf "+stage+" blocked", "host", hostForLog(host), "port", uint16(p), "reason", "port_not_allowed")
+		orDefault(logger).Warn("ssrf "+stage+" blocked", "host", hostForLog(host), "port", uint16(p), "reason", "port_not_allowed")
 		return ssrfErr(KindBadPort, host, fmt.Sprintf("SSRF %s: port %d is not allowed", stage, p), nil)
 	}
 	return nil
@@ -1009,7 +1031,7 @@ func checkAllowedPort(allowedPorts map[uint16]struct{}, host, portStr, stage str
 // rebinding window. A policy rejection reports denyKind (default
 // KindNonPublicIP; SafeTransport passes KindPolicyDenied under a custom
 // WithAddressPolicy); structural rejections always report KindNonPublicIP.
-func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(network, address string, c syscall.RawConn) error {
+func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, logger *slog.Logger, denyKind ...ErrorKind) func(network, address string, c syscall.RawConn) error {
 	policyDenyKind := KindNonPublicIP
 	if len(denyKind) > 0 {
 		policyDenyKind = denyKind[0]
@@ -1021,30 +1043,30 @@ func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKin
 			// from caller input. TestTransportRefusalLogsAreSafe drives only the
 			// refusal sites that log caller-derived text, so it has no case for
 			// this branch.
-			slog.Default().Warn("ssrf control blocked", "network", network, "reason", "disallowed_network")
+			orDefault(logger).Warn("ssrf control blocked", "network", network, "reason", "disallowed_network")
 			return ssrfErr(KindNonPublicIP, "", fmt.Sprintf("SSRF control: disallowed network %q", network), nil)
 		}
 
 		host, portStr, err := net.SplitHostPort(address)
 		if err != nil {
-			slog.Default().Warn("ssrf control blocked", "address", addrForLog(address), "reason", "invalid_address")
+			orDefault(logger).Warn("ssrf control blocked", "address", addrForLog(address), "reason", "invalid_address")
 			return ssrfErr(KindInvalidURL, "", fmt.Sprintf("SSRF control: invalid address %q", address), err)
 		}
 
 		// Validate port at dial time.
-		if err := checkAllowedPort(allowedPorts, host, portStr, "control"); err != nil {
+		if err := checkAllowedPort(allowedPorts, logger, host, portStr, "control"); err != nil {
 			return err
 		}
 
 		// Validate IP at dial time (defense-in-depth).
 		addr, parseErr := netip.ParseAddr(host)
 		if parseErr != nil {
-			slog.Default().Warn("ssrf control blocked", "ip", hostForLog(host), "reason", "unparseable_ip")
+			orDefault(logger).Warn("ssrf control blocked", "ip", hostForLog(host), "reason", "unparseable_ip")
 			return ssrfErr(KindNonPublicIP, host, fmt.Sprintf("SSRF control: cannot parse IP %q", host), parseErr)
 		}
 		addr = addr.Unmap()
 		if !policy(addr) {
-			slog.Default().Warn("ssrf control blocked",
+			orDefault(logger).Warn("ssrf control blocked",
 				"ip", addr.String(), "reason", reasonLabel(policyDenyKind))
 			return ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF control: IP %s is not public", addr), nil)
 		}
@@ -1060,7 +1082,7 @@ func safeControl(policy AddressPolicy, allowedPorts map[uint16]struct{}, denyKin
 // rejects a resolved IP; it defaults to KindNonPublicIP and is forwarded to
 // safeControl so both validation layers report the same kind. SafeTransport
 // passes KindPolicyDenied when a custom WithAddressPolicy is in effect.
-func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver, allowedPorts map[uint16]struct{}, denyKind ...ErrorKind) func(ctx context.Context, network, addr string) (net.Conn, error) {
+func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver, allowedPorts map[uint16]struct{}, logger *slog.Logger, denyKind ...ErrorKind) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	policyDenyKind := KindNonPublicIP
 	if len(denyKind) > 0 {
 		policyDenyKind = denyKind[0]
@@ -1072,26 +1094,26 @@ func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver
 	// would silently bypass this layer if a caller supplied it via WithDialer.
 	d := *dialer
 	d.ControlContext = nil
-	d.Control = safeControl(policy, allowedPorts, policyDenyKind)
+	d.Control = safeControl(policy, allowedPorts, logger, policyDenyKind)
 	dialer = &d
 
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
-			slog.Default().Warn("ssrf dial blocked", "address", addrForLog(addr), "reason", "invalid_address")
+			orDefault(logger).Warn("ssrf dial blocked", "address", addrForLog(addr), "reason", "invalid_address")
 			return nil, ssrfErr(KindInvalidURL, "", fmt.Sprintf("SSRF dial: invalid address %q", addr), err)
 		}
 
 		// Validate port at resolve time (fail fast).
-		if portErr := checkAllowedPort(allowedPorts, host, port, "dial"); portErr != nil {
+		if portErr := checkAllowedPort(allowedPorts, logger, host, port, "dial"); portErr != nil {
 			return nil, portErr
 		}
 
-		safe, err := resolveAndValidate(ctx, resolver, policy, host, policyDenyKind)
+		safe, err := resolveAndValidate(ctx, resolver, policy, logger, host, policyDenyKind)
 		if err != nil {
 			return nil, err
 		}
-		return dialValidatedIPs(ctx, dialer, network, host, port, safe)
+		return dialValidatedIPs(ctx, dialer, logger, network, host, port, safe)
 	}
 }
 
@@ -1100,16 +1122,16 @@ func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver
 // one. It returns a freshly allocated slice (never aliasing the resolver's
 // cached return value) so the caller can cap dial attempts without affecting
 // which IPs are validated.
-func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPolicy, host string, policyDenyKind ErrorKind) ([]netip.Addr, error) {
+func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPolicy, logger *slog.Logger, host string, policyDenyKind ErrorKind) ([]netip.Addr, error) {
 	dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
 	cancel()
 	if err != nil {
-		slog.Default().Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "dns_failed", "error", errTextForLog(err))
+		orDefault(logger).Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "dns_failed", "error", errTextForLog(err))
 		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: DNS lookup failed for %q", host), err)
 	}
 	if len(ips) == 0 {
-		slog.Default().Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "no_ips_resolved")
+		orDefault(logger).Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "no_ips_resolved")
 		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: no IPs resolved for %q", host), nil)
 	}
 
@@ -1118,7 +1140,7 @@ func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPo
 	for i := range ips {
 		safe[i] = ips[i].Unmap()
 		if !policy(safe[i]) {
-			slog.Default().Warn("ssrf dial blocked",
+			orDefault(logger).Warn("ssrf dial blocked",
 				"host", hostForLog(host), "resolved_ip", safe[i].String(), "reason", reasonLabel(policyDenyKind))
 			return nil, ssrfErr(policyDenyKind, host, fmt.Sprintf("SSRF dial: resolved IP %s for %q is not public", safe[i], host), nil)
 		}
@@ -1131,7 +1153,7 @@ func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPo
 // attacker-controlled resolver returning many policy-passing-but-blackholed
 // IPs. The cap never gates validation (every address in safe was already
 // policy-checked); it only limits how many are dialed.
-func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, port string, safe []netip.Addr) (net.Conn, error) {
+func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, logger *slog.Logger, network, host, port string, safe []netip.Addr) (net.Conn, error) {
 	// maxDialIPs is applied ONLY here, after resolveAndValidate validated every
 	// resolved IP and failed closed on the first non-public one. Do NOT hoist
 	// this truncation into validation to skip validating IPs we won't dial: a
@@ -1140,14 +1162,14 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, po
 	// it must never gate which IPs get validated.
 	dialList := safe
 	if len(dialList) > maxDialIPs {
-		slog.Default().Warn("ssrf dial capped",
+		orDefault(logger).Warn("ssrf dial capped",
 			"host", hostForLog(host), "resolved", len(safe), "dialing", maxDialIPs)
 		dialList = dialList[:maxDialIPs]
 	}
 	var lastErr error
 	for _, ip := range dialList {
 		if ctx.Err() != nil {
-			slog.Default().Debug("ssrf dial aborted",
+			orDefault(logger).Debug("ssrf dial aborted",
 				"host", hostForLog(host), "reason", "context_cancelled", "error", errTextForLog(ctx.Err()))
 			return nil, fmt.Errorf("SSRF dial: context cancelled: %w", ctx.Err())
 		}
@@ -1157,14 +1179,14 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, network, host, po
 		}
 		lastErr = dialErr
 	}
-	slog.Default().Debug("ssrf dial failed",
+	orDefault(logger).Debug("ssrf dial failed",
 		"host", hostForLog(host), "ips_tried", len(dialList), "error", errTextForLog(lastErr))
 	return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(dialList), host, lastErr)
 }
 
 // SafeTransport returns an *http.Transport hardened against SSRF and
 // DNS rebinding. Use [WithAddressPolicy], [WithDialer], [WithResolver],
-// and [WithAllowedPorts] to customize.
+// [WithAllowedPorts] and [WithLogger] to customize.
 func SafeTransport(opts ...TransportOption) *http.Transport {
 	cfg := transportConfig{
 		policy: isPublicAddr,
@@ -1188,7 +1210,7 @@ func SafeTransport(opts ...TransportOption) *http.Transport {
 		denyKind = KindPolicyDenied
 	}
 	return &http.Transport{
-		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts, denyKind),
+		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts, cfg.logger, denyKind),
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,

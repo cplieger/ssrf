@@ -21,8 +21,9 @@ Every connection, TLS and HTTP/2 included, goes through this dial path. The tran
 | `WithAddressPolicy(AddressPolicy)` | Replaces `IsPublicAddr` with your own allow or deny function, called on each address after IPv4-mapped IPv6 addresses are unwrapped |
 | `WithResolver(Resolver)` | Replaces `net.DefaultResolver`, for example with a test resolver or a DNS-over-HTTPS client |
 | `WithDialer(*net.Dialer)` | Replaces the dialer, so you can set its timeout and keep-alive |
+| `WithLogger(*slog.Logger)` | Sends the transport's refusal lines to this logger instead of `log/slog`'s default |
 
-A nil policy, resolver or dialer is ignored, and the default stays. A refusal by your own address policy reports `KindPolicyDenied`, and a refusal by the default policy reports `KindNonPublicIP`.
+A nil policy, resolver, dialer or logger is ignored, and the default stays. A refusal by your own address policy reports `KindPolicyDenied`, and a refusal by the default policy reports `KindNonPublicIP`.
 
 `WithDialer` copies your dialer, so ssrf never changes the one you passed. On the copy it always installs its own `Control` hook and clears `ControlContext`, because a `ControlContext` set by the caller would otherwise take precedence and skip the socket-time check.
 
@@ -57,7 +58,9 @@ Schemes are a `URLPolicy` setting and never a transport option. Use one `URLPoli
 
 The validation functions do not log. `ValidateURL`, `URLPolicy.Validate` and `IsPublicHost` return their verdict and nothing else. The returned `*Error` carries `Kind`, `Host`, `Msg` and `Err`, so you already hold everything a log line could say, and you decide whether to record it, at your level, through your logger.
 
-The transport logs, because you cannot see its refusals otherwise. The dial path, the `Control` hook and the redirect policies run inside `net/http`, where a refusal can be retried or wrapped before it reaches you. Each refusal emits one `Warn` line, `ssrf dial blocked`, `ssrf control blocked` or `ssrf redirect blocked`, through `log/slog`'s default logger. Each line has a bounded snake_case `reason` attribute such as `non_public_ip`, `bad_port` or `too_many_redirects`, which you can count on a dashboard. No option sets a different logger.
+The transport logs, because you cannot see its refusals otherwise. The dial path, the `Control` hook and the redirect policies run inside `net/http`, where a refusal can be retried or wrapped before it reaches you. Each refusal emits one `Warn` line, `ssrf dial blocked`, `ssrf control blocked` or `ssrf redirect blocked`. Each line has a bounded snake_case `reason` attribute such as `non_public_ip`, `bad_port` or `too_many_redirects`, which you can count on a dashboard.
+
+The dial and `Control` lines go to the logger you pass with `WithLogger`, so a program running one transport per peer can add the peer's name to every line. Without it they go to `log/slog`'s default logger at the time each line is written. The redirect policies are not transport options, so their lines always go to the default logger.
 
 Every untrusted value in those lines is sanitized and length-bounded first. A host, address, URL or port is attacker-influenced by definition, and `slog`'s `JSONHandler` escapes only what JSON requires. C1 control characters, Unicode bidirectional controls and U+2028 and U+2029 would otherwise reach your log pipeline intact. Each value is capped at the longest legal length for its kind, 253 bytes for a host, so a real host is never cut. The cap also stops one refusal from writing an attacker-sized record.
 
