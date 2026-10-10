@@ -96,6 +96,7 @@ const (
 
 	// kindEnd is one past the last Kind. It must stay last: the exhaustive
 	// Kind tests iterate up to it, so a Kind declared below it goes unchecked.
+	//deadset:ignore DS1004 -- Sentinel the exhaustive Kind tests iterate up to, so a newly added Kind cannot go untested.
 	kindEnd
 )
 
