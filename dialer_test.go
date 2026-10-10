@@ -48,7 +48,7 @@ func loopbackIPs(n int) []netip.Addr {
 
 func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}}, nil)
 	_, err := dial(t.Context(), "tcp", "127.0.0.1:443")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for loopback IP")
@@ -57,7 +57,7 @@ func TestSafeDialContext_blocks_private_ip_resolution(t *testing.T) {
 
 func TestSafeDialContext_blocks_private_range(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}}, nil)
 	_, err := dial(t.Context(), "tcp", "192.168.1.1:443")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for private IP")
@@ -66,7 +66,7 @@ func TestSafeDialContext_blocks_private_range(t *testing.T) {
 
 func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}}, nil)
 	_, err := dial(t.Context(), "tcp", "no-port")
 	if err == nil {
 		t.Error("safeDialContext() = nil, want error for invalid address")
@@ -79,7 +79,7 @@ func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 // with a nil error (which callers would treat as a successful connection).
 func TestSafeDialContext_dns_lookup_error_is_wrapped(t *testing.T) {
 	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}}, nil)
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
 
@@ -122,7 +122,7 @@ func TestSafeDialContext_context_cancelled_before_dial(t *testing.T) {
 	// dial's context-cancelled error path.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, r, map[uint16]struct{}{443: {}})
+	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, r, map[uint16]struct{}{443: {}}, nil)
 
 	_, err := dial(ctx, "tcp", "example.com:443")
 
@@ -141,7 +141,7 @@ func TestSafeDialContext_disallowed_port_kind(t *testing.T) {
 	dial := safeDialContext(
 		&net.Dialer{Timeout: 2 * time.Second},
 		isPublicAddr, net.DefaultResolver,
-		map[uint16]struct{}{443: {}},
+		map[uint16]struct{}{443: {}}, nil,
 	)
 	_, err := dial(t.Context(), "tcp", "8.8.8.8:80")
 	if err == nil {
@@ -165,7 +165,7 @@ func TestSafeDialContext_gives_dns_lookup_a_generous_budget(t *testing.T) {
 
 	allowAll := func(netip.Addr) bool { return true }
 	r := budgetResolver{minBudget: time.Second, ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
-	dial := safeDialContext(&net.Dialer{Timeout: 250 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}})
+	dial := safeDialContext(&net.Dialer{Timeout: 250 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}}, nil)
 
 	_, err := dial(t.Context(), "tcp", "slow-dns.example:1")
 
@@ -201,7 +201,7 @@ func TestSafeDialContext_caps_dial_attempts_only_above_maxDialIPs(t *testing.T) 
 			swapDefaultLogger(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
 			r := &mockResolver{ips: loopbackIPs(tc.resolved)}
-			dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}})
+			dial := safeDialContext(&net.Dialer{Timeout: 100 * time.Millisecond}, allowAll, r, map[uint16]struct{}{1: {}}, nil)
 
 			_, _ = dial(t.Context(), "tcp", "many.example:1")
 
@@ -217,7 +217,7 @@ func TestSafeDialContext_caps_dial_attempts_only_above_maxDialIPs(t *testing.T) 
 
 func TestSafeControl_blocks_non_tcp(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}})
+	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
 	err := ctrl("udp4", "8.8.8.8:443", nil)
 	if err == nil {
 		t.Error("safeControl() = nil, want error for non-TCP network")
@@ -230,7 +230,7 @@ func TestSafeControl_blocks_non_tcp(t *testing.T) {
 // Control re-validation rounds.
 func TestSafeControl_blocks_private_ips_table(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}})
+	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
 	v4 := []string{
 		"127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1",
 		"169.254.1.1", "100.64.0.1", "0.1.2.3", "240.0.0.1",
@@ -250,7 +250,7 @@ func TestSafeControl_blocks_private_ips_table(t *testing.T) {
 
 func TestSafeControl_allows_public_ip(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}})
+	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
 	err := ctrl("tcp4", "8.8.8.8:443", nil)
 	if err != nil {
 		t.Errorf("safeControl() = %v, want nil for public IP", err)
@@ -264,7 +264,7 @@ func TestSafeControl_allows_public_ip(t *testing.T) {
 func TestSafeControl_blocks_disallowed_port(t *testing.T) {
 	t.Parallel()
 	ports := map[uint16]struct{}{443: {}}
-	ctrl := safeControl(isPublicAddr, ports)
+	ctrl := safeControl(isPublicAddr, ports, nil)
 	err := ctrl("tcp4", "8.8.8.8:80", nil)
 	if err == nil {
 		t.Error("safeControl() = nil, want error for port 80 when only 443 allowed")
@@ -277,7 +277,7 @@ func TestSafeControl_blocks_disallowed_port(t *testing.T) {
 func TestSafeControl_allows_permitted_port(t *testing.T) {
 	t.Parallel()
 	ports := map[uint16]struct{}{443: {}, 8443: {}}
-	ctrl := safeControl(isPublicAddr, ports)
+	ctrl := safeControl(isPublicAddr, ports, nil)
 	err := ctrl("tcp4", "8.8.8.8:443", nil)
 	if err != nil {
 		t.Errorf("safeControl() = %v, want nil for allowed port 443", err)
@@ -294,7 +294,7 @@ func TestSafeControl_allows_permitted_port(t *testing.T) {
 // to set the allowlist blocks traffic instead of silently opening every port.
 func TestSafeControl_nil_ports_refuses_all(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, nil)
+	ctrl := safeControl(isPublicAddr, nil, nil)
 	if err := ctrl("tcp4", "8.8.8.8:12345", nil); err == nil {
 		t.Error("safeControl() with a nil port set = nil, want every port refused (fail closed)")
 	}
@@ -319,7 +319,7 @@ func TestSafeControl_rejects_malformed_inputs(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctrl := safeControl(isPublicAddr, tc.ports)
+			ctrl := safeControl(isPublicAddr, tc.ports, nil)
 			err := ctrl(tc.network, tc.address, nil)
 			if err == nil {
 				t.Errorf("safeControl(%q, %q) = nil, want error", tc.network, tc.address)
@@ -334,7 +334,7 @@ func TestSafeControl_rejects_malformed_inputs(t *testing.T) {
 func TestSafeControl_unparseable_port_with_allowlist(t *testing.T) {
 	t.Parallel()
 	ports := map[uint16]struct{}{443: {}}
-	ctrl := safeControl(isPublicAddr, ports)
+	ctrl := safeControl(isPublicAddr, ports, nil)
 
 	err := ctrl("tcp4", "8.8.8.8:notaport", nil)
 
@@ -349,7 +349,7 @@ func TestSafeControl_unparseable_port_with_allowlist(t *testing.T) {
 // Control hook blocks an IPv6 link-local literal carrying a zone ID.
 func TestRegression_control_hook_zone_id(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}})
+	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
 	err := ctrl("tcp6", "[fe80::1%eth0]:443", nil)
 	if err == nil {
 		t.Error("Control hook did not block link-local with zone ID")
@@ -360,7 +360,7 @@ func TestRegression_control_hook_zone_id(t *testing.T) {
 // (the socket-time backstop must Unmap before classifying).
 func TestRegression_mapped_all_ranges_control_hook(t *testing.T) {
 	t.Parallel()
-	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}})
+	ctrl := safeControl(isPublicAddr, map[uint16]struct{}{443: {}}, nil)
 	cases := []struct {
 		name string
 		ip   string
@@ -400,7 +400,7 @@ func TestRegression_dial_invalid_port_rejected(t *testing.T) {
 		&net.Dialer{Timeout: 2 * time.Second},
 		isPublicAddr,
 		net.DefaultResolver,
-		map[uint16]struct{}{443: {}},
+		map[uint16]struct{}{443: {}}, nil,
 	)
 	cases := []struct {
 		name string
@@ -534,7 +534,7 @@ func TestRegression_dialer_controlcontext_cleared(t *testing.T) {
 	}
 
 	r := &mockResolver{ips: []netip.Addr{netip.MustParseAddr("127.0.0.1")}}
-	dial := safeDialContext(caller, countPolicy, r, map[uint16]struct{}{9: {}})
+	dial := safeDialContext(caller, countPolicy, r, map[uint16]struct{}{9: {}}, nil)
 
 	// Loopback:9 fails to connect (no service), but both Control hooks fire
 	// at socket creation before the connect, which is all this asserts.
@@ -578,7 +578,7 @@ func TestRegression_caps_dial_attempts_at_maxDialIPs(t *testing.T) {
 		&net.Dialer{Timeout: 250 * time.Millisecond},
 		countPolicy,
 		r,
-		map[uint16]struct{}{9: {}},
+		map[uint16]struct{}{9: {}}, nil,
 	)
 
 	// All 20 loopback IPs pass the (allow-all) policy in the resolve-once loop;
