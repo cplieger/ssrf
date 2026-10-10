@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // hostileRunes carries one rune from each class runesafe treats as unsafe,

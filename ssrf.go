@@ -35,7 +35,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 const schemeHTTPS = "https"
