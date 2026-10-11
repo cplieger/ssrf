@@ -4,7 +4,7 @@ This page lists the errors ssrf returns and what each one asks you to do, for a 
 
 ## The error type
 
-Every refusal is an `*ssrf.Error` with `Kind`, `Host`, `Msg` and `Err` fields. `ValidateURL`, `URLPolicy.Validate`, the redirect policies and the transport's checks all return it, and `errors.As` finds it inside the error an `http.Client` returns. An ordinary connection failure after the checks pass, or a cancelled context, is returned as a plain wrapped error instead.
+Every refusal is an `*ssrf.Error` with `Kind`, `Host`, `Msg` and `Err` fields. `ValidateURL`, `URLPolicy.Validate`, the redirect policies and the transport's checks all return it, and `errors.As` finds it inside the error an `http.Client` returns. An ordinary connection failure after the checks pass, or a cancelled context, is returned as a plain wrapped error instead, naming the host it dialed. A message starts with `SSRF` only when a check refused the request, so a failed DNS lookup, which is a `KindDNSFailed` error, does not.
 
 `Host`, when set, holds the host the refusal is about, such as the host part of a URL or a redirect target. It can contain untrusted input, so sanitize it before you log or display it.
 

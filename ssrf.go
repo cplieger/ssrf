@@ -1121,18 +1121,19 @@ func safeDialContext(dialer *net.Dialer, policy AddressPolicy, resolver Resolver
 // policy-validates EVERY returned IP, failing closed on the first non-public
 // one. It returns a freshly allocated slice (never aliasing the resolver's
 // cached return value) so the caller can cap dial attempts without affecting
-// which IPs are validated.
+// which IPs are validated. A failed lookup is not a refusal: it carries no
+// "SSRF" prefix and logs at Debug, since the caller receives it unchanged.
 func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPolicy, logger *slog.Logger, host string, policyDenyKind ErrorKind) ([]netip.Addr, error) {
 	dnsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	ips, err := resolver.LookupNetIP(dnsCtx, "ip", host)
 	cancel()
 	if err != nil {
-		orDefault(logger).Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "dns_failed", "error", errTextForLog(err))
-		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: DNS lookup failed for %q", host), err)
+		orDefault(logger).Debug("ssrf dial failed", "host", hostForLog(host), "reason", "dns_failed", "error", errTextForLog(err))
+		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("dial: DNS lookup failed for %q", host), err)
 	}
 	if len(ips) == 0 {
-		orDefault(logger).Warn("ssrf dial blocked", "host", hostForLog(host), "reason", "no_ips_resolved")
-		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("SSRF dial: no IPs resolved for %q", host), nil)
+		orDefault(logger).Debug("ssrf dial failed", "host", hostForLog(host), "reason", "no_ips_resolved")
+		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("dial: no IPs resolved for %q", host), nil)
 	}
 
 	// Copy the slice so we never mutate the resolver's cached return value.
@@ -1171,7 +1172,7 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, logger *slog.Logg
 		if ctx.Err() != nil {
 			orDefault(logger).Debug("ssrf dial aborted",
 				"host", hostForLog(host), "reason", "context_cancelled", "error", errTextForLog(ctx.Err()))
-			return nil, fmt.Errorf("SSRF dial: context cancelled: %w", ctx.Err())
+			return nil, fmt.Errorf("dial %q: %w", host, ctx.Err())
 		}
 		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 		if dialErr == nil {
@@ -1181,7 +1182,7 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, logger *slog.Logg
 	}
 	orDefault(logger).Debug("ssrf dial failed",
 		"host", hostForLog(host), "ips_tried", len(dialList), "error", errTextForLog(lastErr))
-	return nil, fmt.Errorf("SSRF dial: all %d IPs for %q failed: %w", len(dialList), host, lastErr)
+	return nil, fmt.Errorf("dial %q: all %d addresses failed: %w", host, len(dialList), lastErr)
 }
 
 // SafeTransport returns an *http.Transport hardened against SSRF and
