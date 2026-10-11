@@ -285,7 +285,7 @@ func TestWithLogger_routesTransportRefusals(t *testing.T) {
 		"port not allowed":   {resolver: private, url: "https://h.example.com:8443/", wantMsg: "ssrf dial blocked"},
 		"dns failed": {
 			resolver: &mockResolver{err: &net.DNSError{Err: "no such host", Name: "h.example.com"}},
-			url:      "https://h.example.com/", wantMsg: "ssrf dial blocked",
+			url:      "https://h.example.com/", wantMsg: "ssrf dial failed",
 		},
 		"dial capped": {
 			resolver: &mockResolver{ips: loopbackIPs(maxDialIPs + 1)},
@@ -300,7 +300,7 @@ func TestWithLogger_routesTransportRefusals(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			def := captureJSON(t)
 			var own bytes.Buffer
-			logger := slog.New(slog.NewJSONHandler(&own, nil)).With("peer", "hub")
+			logger := slog.New(slog.NewJSONHandler(&own, &slog.HandlerOptions{Level: slog.LevelDebug})).With("peer", "hub")
 			opts := append([]TransportOption{WithLogger(logger), WithResolver(tc.resolver)}, tc.opts...)
 			client := &http.Client{Transport: SafeTransport(opts...)}
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, tc.url, http.NoBody)

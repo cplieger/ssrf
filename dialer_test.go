@@ -73,30 +73,61 @@ func TestSafeDialContext_invalid_address_returns_error(t *testing.T) {
 	}
 }
 
-// The .invalid TLD is RFC 2606 reserved to never resolve; this closes the
-// coverage gap on the DNS-lookup-error branch and guards against a silent
-// regression that would drop the SSRF error wrapping or return a nil conn
-// with a nil error (which callers would treat as a successful connection).
-func TestSafeDialContext_dns_lookup_error_is_wrapped(t *testing.T) {
-	t.Parallel()
-	dial := safeDialContext(&net.Dialer{Timeout: 2 * time.Second}, isPublicAddr, net.DefaultResolver, map[uint16]struct{}{443: {}}, nil)
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
+// A dial failure that is not a policy refusal must not read as one: the
+// reported "SSRF dial: all 1 IPs ... no route to host" sent a user hunting for
+// a policy problem when the network was down.
+func TestADialFailureSaysWhatHappened(t *testing.T) {
+	ports := map[uint16]struct{}{443: {}, 1: {}}
+	allowAll := func(netip.Addr) bool { return true }
+	cases := []struct {
+		name       string
+		resolver   Resolver
+		policy     AddressPolicy
+		addr       string
+		wantSSRF   bool
+		wantInText string
+	}{
+		{"a non-public address is a refusal", &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}, isPublicAddr, "internal.example:443", true, "is not public"},
+		{"a disallowed port is a refusal", &mockResolver{ips: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}, isPublicAddr, "public.example:80", true, "port 80 is not allowed"},
+		{"an invalid address is a refusal", &mockResolver{}, isPublicAddr, "no-port", true, "invalid address"},
+		{"a failed lookup is not a refusal", &mockResolver{err: errors.New("server misbehaving")}, isPublicAddr, "gone.example:443", false, `DNS lookup failed for "gone.example"`},
+		{"an empty answer is not a refusal", &mockResolver{}, isPublicAddr, "empty.example:443", false, `no IPs resolved for "empty.example"`},
+		{"every address failing is not a refusal", &mockResolver{ips: loopbackIPs(1)}, allowAll, "down.example:1", false, `dial "down.example": all 1 addresses failed`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dial := safeDialContext(&net.Dialer{Timeout: time.Second}, tc.policy, tc.resolver, ports, nil)
+			conn, err := dial(t.Context(), "tcp", tc.addr)
+			if conn != nil {
+				_ = conn.Close()
+				t.Fatalf("dial(%s) connected, want a failure", tc.addr)
+			}
+			if err == nil {
+				t.Fatalf("dial(%s) = nil error, want a failure", tc.addr)
+			}
+			if got := strings.Contains(err.Error(), "SSRF"); got != tc.wantSSRF {
+				t.Errorf("dial(%s) = %q, says SSRF = %v, want %v", tc.addr, err, got, tc.wantSSRF)
+			}
+			if !strings.Contains(err.Error(), tc.wantInText) {
+				t.Errorf("dial(%s) = %q, want it to contain %q", tc.addr, err, tc.wantInText)
+			}
+		})
+	}
+	t.Run("a failed lookup logs at Debug, not as a block", func(t *testing.T) {
+		var buf bytes.Buffer
+		swapDefaultLogger(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		dial := safeDialContext(&net.Dialer{Timeout: time.Second}, isPublicAddr, &mockResolver{err: errors.New("server misbehaving")}, ports, nil)
 
-	conn, err := dial(ctx, "tcp", "invalid-host-does-not-exist-xyz.invalid:443")
+		_, _ = dial(t.Context(), "tcp", "gone.example:443")
 
-	if conn != nil {
-		t.Errorf("safeDialContext() returned non-nil conn %v, want nil on DNS error", conn)
-	}
-	if err == nil {
-		t.Fatal("safeDialContext() = nil err, want DNS lookup error")
-	}
-	if !strings.Contains(err.Error(), "SSRF dial") {
-		t.Errorf("safeDialContext() err = %q, want error wrapped with \"SSRF dial\" prefix", err.Error())
-	}
-	if !strings.Contains(err.Error(), "DNS lookup failed") {
-		t.Errorf("safeDialContext() err = %q, want \"DNS lookup failed\" in message", err.Error())
-	}
+		out := buf.String()
+		if strings.Contains(out, "blocked") || strings.Contains(out, "level=WARN") {
+			t.Errorf("log = %q, want no Warn and no \"blocked\" for a failed lookup", out)
+		}
+		if !strings.Contains(out, "level=DEBUG") || !strings.Contains(out, `msg="ssrf dial failed"`) || !strings.Contains(out, "reason=dns_failed") {
+			t.Errorf("log = %q, want a Debug \"ssrf dial failed\" line with reason=dns_failed", out)
+		}
+	})
 }
 
 func TestSafeDialContext_empty_resolution_blocked(t *testing.T) {
