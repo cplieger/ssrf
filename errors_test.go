@@ -2,8 +2,36 @@ package ssrf
 
 import (
 	"errors"
+	"net"
 	"testing"
 )
+
+func TestNoIPsResolvedIsDNSNotFound(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport(WithResolver(&mockResolver{}))
+	conn, err := tr.DialContext(t.Context(), "tcp", "empty.example:443")
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("DialContext() connected, want a failure for an empty DNS answer")
+	}
+	dnsErr, ok := errors.AsType[*net.DNSError](err)
+	if !ok {
+		t.Fatalf("DialContext() error = %v (%T), want one wrapping a *net.DNSError", err, err)
+	}
+	if !dnsErr.IsNotFound || dnsErr.Name != "empty.example" {
+		t.Errorf("DNSError = {Name: %q, IsNotFound: %v}, want {Name: \"empty.example\", IsNotFound: true}", dnsErr.Name, dnsErr.IsNotFound)
+	}
+	ssrfError, ok := errors.AsType[*Error](err)
+	if !ok {
+		t.Fatalf("DialContext() error = %v, want an *Error", err)
+	}
+	if ssrfError.Kind != KindDNSFailed {
+		t.Errorf("Error.Kind = %d, want KindDNSFailed (%d)", ssrfError.Kind, KindDNSFailed)
+	}
+	if got, want := err.Error(), `dial: no IPs resolved for "empty.example"`; got != want {
+		t.Errorf("DialContext() error = %q, want %q", got, want)
+	}
+}
 
 // TestError_Kind verifies each validation failure surfaces the documented
 // machine-readable ErrorKind via errors.As(*Error).
