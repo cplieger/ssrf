@@ -52,6 +52,8 @@ No option allows every port. An empty set refuses every port. When your peer sit
 
 A refused hop returns an `*ssrf.Error` that carries the hop's own `Kind`, such as `KindBadScheme`. So `errors.As` on the client's error reports the real reason.
 
+The redirect policies decide where a request may go, not what it carries. `net/http` drops `Authorization`, `Www-Authenticate`, `Cookie`, `Cookie2`, `Proxy-Authorization` and `Proxy-Authenticate` only once a redirect leaves the first request's host and its subdomains. A 301, 302 or 303 sends the next request without a body, turning a `POST` into a `GET`, so from that hop on it also drops `Content-Encoding`, `Content-Language`, `Content-Location` and `Content-Type`. It copies every other header you set, custom credential headers included, to the next hop. A key in a custom header such as `X-Api-Key` therefore reaches any public host a redirect names. For such a request, pass a `next` that refuses a hop to another host, such as [httpx](https://github.com/cplieger/httpx)'s `RedirectPolicyFunc(httpx.WithSameHost(true))`, or refuse every redirect.
+
 Schemes are a `URLPolicy` setting and never a transport option. Use one `URLPolicy` for the first request and for its redirects, and the transport for the addresses and ports.
 
 ## Logging

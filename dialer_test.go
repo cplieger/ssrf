@@ -90,7 +90,7 @@ func TestADialFailureSaysWhatHappened(t *testing.T) {
 		{"a non-public address is a refusal", &mockResolver{ips: []netip.Addr{netip.MustParseAddr("10.0.0.1")}}, isPublicAddr, "internal.example:443", true, "is not public"},
 		{"a disallowed port is a refusal", &mockResolver{ips: []netip.Addr{netip.MustParseAddr("8.8.8.8")}}, isPublicAddr, "public.example:80", true, "port 80 is not allowed"},
 		{"an invalid address is a refusal", &mockResolver{}, isPublicAddr, "no-port", true, "invalid address"},
-		{"a failed lookup is not a refusal", &mockResolver{err: errors.New("server misbehaving")}, isPublicAddr, "gone.example:443", false, `DNS lookup failed for "gone.example"`},
+		{"a failed lookup is not a refusal", &mockResolver{err: errors.New("server misbehaving")}, isPublicAddr, "gone.example:443", false, `DNS lookup failed for "gone.example": server misbehaving`},
 		{"an empty answer is not a refusal", &mockResolver{}, isPublicAddr, "empty.example:443", false, `no IPs resolved for "empty.example"`},
 		{"every address failing is not a refusal", &mockResolver{ips: loopbackIPs(1)}, allowAll, "down.example:1", false, `dial "down.example": all 1 addresses failed`},
 	}
@@ -128,22 +128,6 @@ func TestADialFailureSaysWhatHappened(t *testing.T) {
 			t.Errorf("log = %q, want a Debug \"ssrf dial failed\" line with reason=dns_failed", out)
 		}
 	})
-}
-
-func TestSafeDialContext_empty_resolution_blocked(t *testing.T) {
-	t.Parallel()
-	r := &mockResolver{ips: nil}
-	tr := SafeTransport(WithResolver(r))
-	_, err := tr.DialContext(t.Context(), "tcp", "evil.com:443")
-	if err == nil {
-		t.Fatal("DialContext() = nil, want error when resolver returns no IPs")
-	}
-	if ssrfError, ok := errors.AsType[*Error](err); !ok || ssrfError.Kind != KindDNSFailed {
-		t.Errorf("DialContext() error = %v, want KindDNSFailed", err)
-	}
-	if !strings.Contains(err.Error(), "no IPs resolved") {
-		t.Errorf("DialContext() error = %q, want no IPs resolved message", err.Error())
-	}
 }
 
 func TestSafeDialContext_context_cancelled_before_dial(t *testing.T) {
