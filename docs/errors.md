@@ -4,7 +4,9 @@ This page lists the errors ssrf returns and what each one asks you to do, for a 
 
 ## The error type
 
-Every refusal is an `*ssrf.Error` with `Kind`, `Host`, `Msg` and `Err` fields. `ValidateURL`, `URLPolicy.Validate`, the redirect policies and the transport's checks all return it, and `errors.As` finds it inside the error an `http.Client` returns. An ordinary connection failure after the checks pass, or a cancelled context, is returned as a plain wrapped error instead, naming the host it dialed. A message starts with `SSRF` only when a check refused the request, so a failed DNS lookup, which is a `KindDNSFailed` error, does not.
+Every refusal is an `*ssrf.Error` with `Kind`, `Host`, `Msg` and `Err` fields. `ValidateURL`, `URLPolicy.Validate`, the redirect policies and the transport's checks all return it, and `errors.As` finds it inside the error an `http.Client` returns. A redirect hop that the [`next` function](transport.md#redirect-policies) you pass refuses returns that function's own error instead.
+
+An ordinary connection failure after the checks pass, or a cancelled context, is returned as a plain wrapped error instead, naming the host it dialed. A message starts with `SSRF` only when a check refused the request, so a failed DNS lookup, which is a `KindDNSFailed` error, does not.
 
 A `KindDNSFailed` error wraps the resolver's own error when the lookup failed. When the resolver answered with no address, it wraps a `*net.DNSError` with `IsNotFound` set, the error `net.Resolver` returns for a name that does not resolve. So with the standard resolver, or any resolver that reports a failed lookup as a `*net.DNSError`, `errors.As` finds a `*net.DNSError` in every `KindDNSFailed` error.
 
