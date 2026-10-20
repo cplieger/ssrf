@@ -1,6 +1,6 @@
 module github.com/cplieger/ssrf/v4
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/cplieger/runesafe/v3 v3.1.0
