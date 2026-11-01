@@ -109,10 +109,13 @@ type Error struct {
 	// Host is the hostname or IP that triggered the error (may be empty).
 	Host string
 	Kind ErrorKind
+	// msgCoversErr: Msg already says what Err says, so Error leaves Err's
+	// text out while errors.As still reaches Err.
+	msgCoversErr bool
 }
 
 func (e *Error) Error() string {
-	if e.Err != nil {
+	if e.Err != nil && !e.msgCoversErr {
 		return e.Msg + ": " + e.Err.Error()
 	}
 	return e.Msg
@@ -995,7 +998,9 @@ func (p URLPolicy) RedirectPolicy(
 			kind := verr.Kind
 			slog.Default().Warn("ssrf redirect blocked",
 				"url", urlForLog(req.URL.Redacted()), "reason", reasonLabel(kind), "error", errTextForLog(verr))
-			return ssrfErr(kind, req.URL.Hostname(), "redirect blocked (SSRF): "+verr.Error(), verr)
+			e := ssrfErr(kind, req.URL.Hostname(), "redirect blocked (SSRF): "+verr.Error(), verr)
+			e.msgCoversErr = true
+			return e
 		}
 		if next != nil {
 			return next(req, via)
@@ -1133,7 +1138,12 @@ func resolveAndValidate(ctx context.Context, resolver Resolver, policy AddressPo
 	}
 	if len(ips) == 0 {
 		orDefault(logger).Debug("ssrf dial failed", "host", hostForLog(host), "reason", "no_ips_resolved")
-		return nil, ssrfErr(KindDNSFailed, host, fmt.Sprintf("dial: no IPs resolved for %q", host), nil)
+		// net.Resolver answers a name with no address as this not-found
+		// *net.DNSError, so a caller's errors.As sees one DNS verdict for both.
+		notFound := &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+		e := ssrfErr(KindDNSFailed, host, fmt.Sprintf("dial: no IPs resolved for %q", host), notFound)
+		e.msgCoversErr = true
+		return nil, e
 	}
 
 	// Copy the slice so we never mutate the resolver's cached return value.

@@ -108,6 +108,15 @@ func TestSafeRedirectPolicy_propagates_inner_kind(t *testing.T) {
 	}
 }
 
+func TestSafeRedirectPolicy_error_states_inner_reason_once(t *testing.T) {
+	t.Parallel()
+	err := SafeRedirectPolicy(nil)(newTestReq(t, "http://127.0.0.1/x"), nil)
+	const want = `redirect blocked (SSRF): URL scheme must be https, got "http"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("SafeRedirectPolicy refusal error = %v, want %q", err, want)
+	}
+}
+
 // Even when a caller supplies a custom next, the 10-redirect cap must
 // still apply — next could be a trivial passthrough that has no cap.
 func TestSafeRedirectPolicy_caps_redirects_with_custom_next(t *testing.T) {
