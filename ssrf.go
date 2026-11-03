@@ -61,6 +61,18 @@ const maxRedirects = 10
 // among the validated set. Defense-in-depth, matching smokescreen/safeurl.
 const maxDialIPs = 8
 
+// The HTTP/2 health check closes a connection that read no frame for
+// h2SendPingTimeout and then left its PING unanswered for h2PingTimeout.
+// Invariant: their sum stays below responseHeaderTimeout, so a request on a
+// silent connection ends "client connection lost" before its header timeout
+// and its retry dials a new connection. A caller deadline at or under the sum
+// does not get that fast close.
+const (
+	responseHeaderTimeout = 15 * time.Second
+	h2SendPingTimeout     = 10 * time.Second
+	h2PingTimeout         = 3 * time.Second
+)
+
 // ErrorKind classifies SSRF validation failures. Consumers can use
 // errors.As(*Error) and switch on Kind for programmatic handling,
 // mirroring doyensec/safeurl's typed error approach.
@@ -1198,6 +1210,11 @@ func dialValidatedIPs(ctx context.Context, dialer *net.Dialer, logger *slog.Logg
 // SafeTransport returns an *http.Transport hardened against SSRF and
 // DNS rebinding. Use [WithAddressPolicy], [WithDialer], [WithResolver],
 // [WithAllowedPorts] and [WithLogger] to customize.
+//
+// Its HTTP2 PING window closes a silent connection 13 s after its last frame:
+// only a request whose deadline is above 13 s fails with client connection lost
+// before its header timeout, so a retry by the caller dials a new connection.
+// Lowering ResponseHeaderTimeout means lowering HTTP2's timeouts.
 func SafeTransport(opts ...TransportOption) *http.Transport {
 	cfg := transportConfig{
 		policy: isPublicAddr,
@@ -1223,11 +1240,15 @@ func SafeTransport(opts ...TransportOption) *http.Transport {
 	return &http.Transport{
 		DialContext:           safeDialContext(cfg.dialer, cfg.policy, cfg.resolver, cfg.allowedPorts, cfg.logger, denyKind),
 		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 15 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   4,
 		ForceAttemptHTTP2:     true,
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: h2SendPingTimeout,
+			PingTimeout:     h2PingTimeout,
+		},
 	}
 }
