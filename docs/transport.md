@@ -43,8 +43,16 @@ No option allows every port. An empty set refuses every port. When your peer sit
 | Idle connection timeout | 90 seconds |
 | Idle connections | 100 in total, 4 per host |
 | HTTP/2 | attempted |
+| HTTP/2 PING (`HTTP2.SendPingTimeout`) | sent after 10 seconds with no frame read |
+| HTTP/2 PING timeout (`HTTP2.PingTimeout`) | 3 seconds, then the connection closes |
 
 `SafeTransport` returns a plain `*http.Transport`, so you can change any of these fields on the value it returns. Leave `DialContext` as it is, because it carries both checks.
+
+The PING closes an HTTP/2 connection whose peer went silent at most 13 seconds after the last frame it read. That is below the 15-second response header timeout, so a request waiting on a silent connection fails with `http2: client connection lost` before its header timeout. A retry then dials a new connection. Only a request whose deadline is above 13 seconds gets that fast close. A request with a shorter `http.Client.Timeout` or context deadline times out on its own, and a request sent before the close can reuse the dead connection.
+
+If you lower `ResponseHeaderTimeout`, lower both `HTTP2` timeouts with it so their sum stays below it.
+
+Some servers answer a PING with `GOAWAY` and the code `ENHANCE_YOUR_CALM`, meaning too many pings. That ends the idle connection, and the next request, a `POST` included, opens a new one. A PING goes out only after 10 seconds with no frame read, so an idle connection takes at most 8 of them before the 90-second idle timeout closes it.
 
 ## Redirect policies
 

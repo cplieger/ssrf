@@ -257,6 +257,25 @@ func TestSafeTransport_returns_non_nil(t *testing.T) {
 	}
 }
 
+// The two behaviour tests in transport_h2_test.go set scaled values of their
+// own, so this is what goes red if the shipped HTTP2 line is dropped.
+func TestSafeTransport_HTTP2PingWindowFitsHeaderTimeout(t *testing.T) {
+	t.Parallel()
+	tr := SafeTransport()
+	if tr.HTTP2 == nil {
+		t.Fatal("SafeTransport().HTTP2 = nil, want a PING health check")
+	}
+	if tr.HTTP2.SendPingTimeout != 10*time.Second {
+		t.Errorf("SafeTransport().HTTP2.SendPingTimeout = %v, want 10s", tr.HTTP2.SendPingTimeout)
+	}
+	if tr.HTTP2.PingTimeout != 3*time.Second {
+		t.Errorf("SafeTransport().HTTP2.PingTimeout = %v, want 3s", tr.HTTP2.PingTimeout)
+	}
+	if window := tr.HTTP2.SendPingTimeout + tr.HTTP2.PingTimeout; window >= tr.ResponseHeaderTimeout {
+		t.Errorf("SafeTransport() PING window %v >= ResponseHeaderTimeout %v, want strictly below", window, tr.ResponseHeaderTimeout)
+	}
+}
+
 // A nil TransportOption element in the variadic must be skipped (not
 // dereferenced, which would panic), and the default policy must still block
 // private IPs.
