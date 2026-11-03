@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1793744526286,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/ssrf",
   "entries": {
     "Benchmark": [
       {
@@ -6331,10 +6331,10 @@ window.BENCHMARK_DATA = {
             "username": "web-flow",
             "email": "noreply@github.com"
           },
-          "id": "9ead40e51a68dd7202d29b68a7ab6cbcb6e5d0cb",
-          "message": "chore(audit): expect AGPL-3.0 for grelot (#915)",
-          "timestamp": "2026-11-03T19:17:26Z",
-          "url": "https://github.com/cplieger/ci/commit/9ead40e51a68dd7202d29b68a7ab6cbcb6e5d0cb"
+          "id": "f3ba1b7beaff962485d948652c72d554a132d9d3",
+          "message": "feat: close silent HTTP/2 connections with a PING health check (#626)\n\n## Release note\n\nA request through `SafeTransport` no longer waits out a connection whose peer went silent. The transport pings an HTTP/2 connection after 10 seconds with no frame read and closes it when the ping goes unanswered for 3 seconds, so a retry dials a new connection.",
+          "timestamp": "2026-11-03T15:43:52Z",
+          "url": "https://github.com/cplieger/ssrf/commit/f3ba1b7beaff962485d948652c72d554a132d9d3"
         },
         "date": 1793744525705,
         "tool": "customSmallerIsBetter",
