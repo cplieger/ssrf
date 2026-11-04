@@ -54,14 +54,55 @@ func h2Transport(t *testing.T, srv *httptest.Server, addr string, h2 *http.HTTP2
 	return tr
 }
 
+// connGroup owns a test listener's accept loop, its connections and the
+// goroutines serving them; shutdown closes them all and waits, so none of them
+// can log after the test completes.
+type connGroup struct {
+	ln      net.Listener
+	wg      sync.WaitGroup
+	mu      sync.Mutex
+	conns   []net.Conn
+	stopped bool
+}
+
+// track records conns for shutdown to close, or closes them and returns false
+// once shutdown has begun.
+func (g *connGroup) track(conns ...net.Conn) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.stopped {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		return false
+	}
+	g.conns = append(g.conns, conns...)
+	return true
+}
+
+func (g *connGroup) stopping() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.stopped
+}
+
+func (g *connGroup) shutdown() {
+	g.mu.Lock()
+	g.stopped = true
+	_ = g.ln.Close()
+	for _, c := range g.conns {
+		_ = c.Close()
+	}
+	g.mu.Unlock()
+	g.wg.Wait()
+}
+
 // silencingProxy forwards TCP to a target until silence is called, after which
 // every connection it already accepted drops its bytes in both directions while
 // new connections forward normally: a peer that went silent mid-connection.
 type silencingProxy struct {
-	ln       net.Listener
+	connGroup
 	target   string
-	mu       sync.Mutex
-	conns    []net.Conn
 	silent   []*atomic.Bool
 	accepted atomic.Int32
 }
@@ -73,15 +114,8 @@ func newSilencingProxy(t *testing.T, target string) *silencingProxy {
 		t.Fatalf("net.Listen() error = %v", err)
 	}
 	p := &silencingProxy{ln: ln, target: target}
-	go p.serve()
-	t.Cleanup(func() {
-		_ = ln.Close()
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		for _, c := range p.conns {
-			_ = c.Close()
-		}
-	})
+	p.wg.Go(p.serve)
+	t.Cleanup(p.shutdown)
 	return p
 }
 
@@ -96,14 +130,16 @@ func (p *silencingProxy) serve() {
 			_ = down.Close()
 			continue
 		}
+		if !p.track(down, up) {
+			return
+		}
 		silent := new(atomic.Bool)
 		p.mu.Lock()
-		p.conns = append(p.conns, down, up)
 		p.silent = append(p.silent, silent)
 		p.mu.Unlock()
 		p.accepted.Add(1)
-		go pipeUnlessSilent(up, down, silent)
-		go pipeUnlessSilent(down, up, silent)
+		p.wg.Go(func() { pipeUnlessSilent(up, down, silent) })
+		p.wg.Go(func() { pipeUnlessSilent(down, up, silent) })
 	}
 }
 
@@ -210,14 +246,12 @@ const (
 // goAwayListener serves its first connection with calmServer and forwards
 // every later one to target.
 type goAwayListener struct {
-	ln       net.Listener
+	connGroup
 	target   string
 	cert     []tls.Certificate
 	accepted atomic.Int32
 	pinged   chan struct{} // closed once the GOAWAY answering the PING is written
-	closed   chan struct{} // closed once the client closed the first connection
-	mu       sync.Mutex
-	conns    []net.Conn
+	closed   chan struct{} // closed once calmServer returns: the client closed the first connection, or calmServer failed
 }
 
 func newGoAwayListener(t *testing.T, srv *httptest.Server) *goAwayListener {
@@ -233,22 +267,9 @@ func newGoAwayListener(t *testing.T, srv *httptest.Server) *goAwayListener {
 		pinged: make(chan struct{}),
 		closed: make(chan struct{}),
 	}
-	go l.serve(t)
-	t.Cleanup(func() {
-		_ = ln.Close()
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		for _, c := range l.conns {
-			_ = c.Close()
-		}
-	})
+	l.wg.Go(func() { l.serve(t) })
+	t.Cleanup(l.shutdown)
 	return l
-}
-
-func (l *goAwayListener) track(c net.Conn) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.conns = append(l.conns, c)
 }
 
 func (l *goAwayListener) serve(t *testing.T) {
@@ -257,9 +278,11 @@ func (l *goAwayListener) serve(t *testing.T) {
 		if err != nil {
 			return
 		}
-		l.track(down)
+		if !l.track(down) {
+			return
+		}
 		if l.accepted.Add(1) == 1 {
-			go l.calmServer(t, down)
+			l.wg.Go(func() { l.calmServer(t, down) })
 			continue
 		}
 		up, err := net.Dial("tcp", l.target)
@@ -267,9 +290,20 @@ func (l *goAwayListener) serve(t *testing.T) {
 			_ = down.Close()
 			continue
 		}
-		l.track(up)
-		go func() { _, _ = io.Copy(up, down) }()
-		go func() { _, _ = io.Copy(down, up) }()
+		if !l.track(up) {
+			return
+		}
+		l.wg.Go(func() { _, _ = io.Copy(up, down) })
+		l.wg.Go(func() { _, _ = io.Copy(down, up) })
+	}
+}
+
+// errorf reports a calmServer failure unless shutdown has begun, since an
+// error from then on is shutdown closing the connection.
+func (l *goAwayListener) errorf(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if !l.stopping() {
+		t.Errorf(format, args...)
 	}
 }
 
@@ -283,11 +317,11 @@ func (l *goAwayListener) calmServer(t *testing.T, raw net.Conn) {
 	defer conn.Close()
 	preface := make([]byte, len("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"))
 	if _, err := io.ReadFull(conn, preface); err != nil {
-		t.Errorf("calmServer: reading the client preface: %v", err)
+		l.errorf(t, "calmServer: reading the client preface: %v", err)
 		return
 	}
 	if err := writeH2Frame(conn, h2FrameSettings, 0, 0, nil); err != nil {
-		t.Errorf("calmServer: writing SETTINGS: %v", err)
+		l.errorf(t, "calmServer: writing SETTINGS: %v", err)
 		return
 	}
 	var lastStream uint32
@@ -311,7 +345,7 @@ func (l *goAwayListener) calmServer(t *testing.T, raw net.Conn) {
 			}
 		}
 		if err != nil {
-			t.Errorf("calmServer: answering frame type %#x: %v", typ, err)
+			l.errorf(t, "calmServer: answering frame type %#x: %v", typ, err)
 			return
 		}
 	}
