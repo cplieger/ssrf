@@ -1,5 +1,8 @@
 # ssrf
 
+> Moved to [`github.com/cplieger/go/ssrf`](https://github.com/cplieger/go/tree/dev/ssrf).
+> **Archived 2026-11-06. This repository is read-only. The published Go module stays available.**
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/ssrf/v4.svg)](https://pkg.go.dev/github.com/cplieger/ssrf/v4) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/ssrf)](https://github.com/cplieger/ssrf/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/ssrf/badges/mutation.json)](https://github.com/cplieger/ssrf/issues?q=label%3Agremlins-tracker)
 
 ssrf keeps your Go service's outbound requests off private networks and cloud metadata endpoints, by checking URLs before you fetch and every address at connect time.
